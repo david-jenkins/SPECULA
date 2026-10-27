@@ -22,6 +22,9 @@ find_package(Threads REQUIRED)
 
 nanobind_add_module(specula_cpp NB_STATIC src/module.cpp)
 target_link_libraries(specula_cpp PRIVATE Threads::Threads)
+# pocketfft (header only): the kernels run its 1D FFTs on their own threads
+target_include_directories(specula_cpp PRIVATE third_party/pocketfft)
+target_compile_definitions(specula_cpp PRIVATE POCKETFFT_NO_MULTITHREADING)
 
 if(SPECULA_CPP_NATIVE)
   include(CheckCXXCompilerFlag)

@@ -181,7 +181,7 @@ use it instead of NumPy/SciPy for their heaviest computations: interpolations, r
 electric fields, and the per-step work of the ``PSF``, ``ModulatedPyramid``, ``SH``,
 ``AtmoPropagation`` and ``AtmoEvolution`` objects. Results are the same up to floating
 point rounding. For example, an open-loop SCAO simulation with a pyramid, a 20x20 SH and
-four science cameras runs about 9 times faster than with NumPy. With many or large science
+four science cameras runs about 10 times faster than with NumPy. With many or large science
 cameras, the ``psf_dt`` parameter of ``PSF`` (an approximation of the long exposure, see its
 documentation) can reduce the cost further.
 

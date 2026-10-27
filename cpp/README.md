@@ -8,6 +8,9 @@ rebinning, electric field computation and the per-step work of the PSF,
 pyramid and Shack-Hartmann objects, instead of the numpy/scipy code.
 Results are the same up to floating point rounding.
 
+The pyramid uses the FFTs of [pocketfft](https://github.com/mreineck/pocketfft)
+(BSD 3-clause license), included unchanged in `third_party/pocketfft`.
+
 ## Installation
 
 From the root of the SPECULA repository:

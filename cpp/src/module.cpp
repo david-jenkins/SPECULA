@@ -26,6 +26,7 @@
 #endif
 
 #include "kernels.hpp"
+#include "pyramid.hpp"
 
 namespace nb = nanobind;
 using namespace specula_cpp;
@@ -241,50 +242,34 @@ void py_accumulate_sum_sq(in_array<T> v, out_array<T> sum, out_array<T> sum_sq) 
 }
 
 template <class T>
-void py_pyr_modulate(in_array<cplx<T>> ef, in_array<cplx<T>> tlt_f, in_array<cplx<T>> ttexp,
-                     out_array<cplx<T>> u) {
+void py_pyr_modulation(in_array<cplx<T>> ef, in_array<cplx<T>> tlt_f, in_array<cplx<T>> ttexp,
+                       in_array<cplx<T>> mask, in_array<T> ffv, T norm, in_array<std::int64_t> stop_rows,
+                       out_array<cplx<T>> chunk, out_array<T> fpsf, out_array<T> image) {
     require(ef.ndim() == 2 && dim(ef, 0) == dim(ef, 1), "ef must be square");
     idx s = dim(ef, 0);
     require_shape(tlt_f, {s, s}, "tlt_f");
     require(ttexp.ndim() == 3 && dim(ttexp, 1) == s && dim(ttexp, 2) == s, "ttexp must have shape (m, s, s)");
-    idx mc = dim(ttexp, 0);
-    require(u.ndim() == 3 && dim(u, 0) == mc && dim(u, 1) == dim(u, 2) && dim(u, 1) >= s,
-            "u must have shape (m, t, t), t >= s");
-    const cplx<T> *pe = ef.data(), *pf = tlt_f.data(), *pt = ttexp.data();
-    cplx<T> *pu = u.data();
-    idx t = dim(u, 1);
-    nb::gil_scoped_release release;
-    pyr_modulate(pe, pf, pt, mc, s, t, pu);
-}
-
-template <class T>
-void py_pyr_focal(out_array<cplx<T>> F, in_array<cplx<T>> mask, in_array<T> ffv, out_array<T> fpsf) {
-    require(F.ndim() == 3, "F must have shape (m, t, t)");
-    idx mc = dim(F, 0);
-    require_shape(mask, {dim(F, 1), dim(F, 2)}, "mask");
-    require_shape(fpsf, {dim(F, 1), dim(F, 2)}, "fpsf");
-    require(count(ffv) == mc, "ffv must have one element per modulation step");
-    cplx<T> *pF = F.data();
-    const cplx<T> *pm = mask.data();
+    idx m = dim(ttexp, 0);
+    require(count(ffv) == m, "ffv must have one element per modulation step");
+    require(mask.ndim() == 2 && dim(mask, 0) == dim(mask, 1) && dim(mask, 0) >= s,
+            "mask must have shape (t, t), t >= s");
+    idx t = dim(mask, 0);
+    require(chunk.ndim() == 3 && dim(chunk, 0) > 0 && dim(chunk, 1) == t && dim(chunk, 2) == t,
+            "chunk must have shape (nc, t, t)");
+    require_shape(fpsf, {t, t}, "fpsf");
+    require_shape(image, {t, t}, "image");
+    require(stop_rows.ndim() == 2 && dim(stop_rows, 1) == 2, "stop_rows must have shape (n, 2)");
+    const std::int64_t *pr = stop_rows.data();
+    for (idx r = 0; r < dim(stop_rows, 0); ++r)
+        require(pr[2 * r] >= 0 && pr[2 * r] < pr[2 * r + 1] && pr[2 * r + 1] <= t,
+                "stop_rows ranges must be within [0, t)");
+    const cplx<T> *pe = ef.data(), *pf = tlt_f.data(), *pt = ttexp.data(), *pm = mask.data();
     const T *pw = ffv.data();
-    T *pp = fpsf.data();
-    idx n = dim(F, 1) * dim(F, 2);
+    cplx<T> *pc = chunk.data();
+    T *pp = fpsf.data(), *pi = image.data();
+    idx n_ranges = dim(stop_rows, 0), nc = dim(chunk, 0);
     nb::gil_scoped_release release;
-    pyr_focal(pF, mc, n, pm, pw, pp);
-}
-
-template <class T>
-void py_pyr_pupil(in_array<cplx<T>> P, in_array<T> ffv, T norm, out_array<T> image) {
-    require(P.ndim() == 3, "P must have shape (m, t, t)");
-    idx mc = dim(P, 0);
-    require_shape(image, {dim(P, 1), dim(P, 2)}, "image");
-    require(count(ffv) == mc, "ffv must have one element per modulation step");
-    const cplx<T> *pP = P.data();
-    const T *pw = ffv.data();
-    T *pi = image.data();
-    idx n = dim(P, 1) * dim(P, 2);
-    nb::gil_scoped_release release;
-    pyr_pupil(pP, mc, n, pw, norm, pi);
+    pyr_modulation(pe, pf, pt, m, s, pm, pw, norm, pr, n_ranges, pc, nc, t, pp, pi);
 }
 
 template <class T>
@@ -374,9 +359,8 @@ void bind_real(nb::module_ &m) {
     m.def("abs2_shift", &py_abs2_shift<T>, a("input"), nb::arg("shift"), a("out"));
     m.def("divide_inplace", &py_divide_inplace<T>, a("a"), nb::arg("d"));
     m.def("accumulate_sum_sq", &py_accumulate_sum_sq<T>, a("value"), a("total"), a("total_sq"));
-    m.def("pyr_modulate", &py_pyr_modulate<T>, a("ef"), a("tlt_f"), a("ttexp"), a("u"));
-    m.def("pyr_focal", &py_pyr_focal<T>, a("F"), a("mask"), a("ffv"), a("fpsf"));
-    m.def("pyr_pupil", &py_pyr_pupil<T>, a("P"), a("ffv"), nb::arg("norm"), a("image"));
+    m.def("pyr_modulation", &py_pyr_modulation<T>, a("ef"), a("tlt_f"), a("ttexp"), a("mask"), a("ffv"),
+          nb::arg("norm"), a("stop_rows"), a("chunk"), a("fpsf"), a("image"));
     m.def("abs2_tiled_mask", &py_abs2_tiled_mask<T>, a("input"), a("mask"), a("out"));
     m.def("abs2", &py_abs2<T>, a("input"), a("out"));
     m.def("sh_subap_cube", &py_sh_subap_cube<T>, a("ef"), nb::arg("dimx"), a("tltf"), a("out"));

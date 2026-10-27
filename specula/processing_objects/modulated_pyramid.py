@@ -1,5 +1,4 @@
 import numpy as np
-import scipy.fft
 
 from specula import fuse, cpp_compatible
 from specula.lib.extrapolation_2d import EFInterpolator
@@ -31,20 +30,9 @@ def pyr1_abs2(v, norm, ffv, xp):
     return xp.real(v_norm * xp.conj(v_norm)) * ffv
 
 
-# Memory used by the C++ backend for the modulated fields of a chunk of modulation steps.
-# Small enough for a chunk to stay in cache between the FFT passes and the C++ kernels.
+# Memory used by the C++ backend for the fields of a chunk of modulation steps.
+# Small enough for a chunk to stay in cache between the FFT passes.
 _CPP_CHUNK_BYTES = 16 * 1024 * 1024
-
-
-def _transform_inplace(transform, view, **kwargs):
-    '''
-    Apply a scipy.fft transform to view, in place. scipy works in place on
-    contiguous and strided views when allowed to overwrite them, but this
-    is not guaranteed: a new result array is copied back.
-    '''
-    out = transform(view, overwrite_x=True, **kwargs)
-    if not np.may_share_memory(out, view):
-        view[...] = out
 
 
 class ModulatedPyramid(BaseProcessingObj):
@@ -640,29 +628,18 @@ class ModulatedPyramid(BaseProcessingObj):
 
     def _modulation_cpp(self, ttexp):
         '''
-        Modulation steps with the C++ CPU backend, a chunk of steps at a time:
-        same computation as the loop in trigger_code(), with fused C++ kernels
-        between batched, multithreaded FFTs of the whole chunk.
+        Modulation steps with the C++ CPU backend: same computation as the loop
+        in trigger_code(), a chunk of steps at a time, in a single C++ call.
 
-        The 2D FFTs are done one axis at a time, so that the row transforms skip
-        the rows known to be zero: the zero padding below the input field in the
-        forward FFT, and the rows outside the field stop in the inverse FFT.
+        The 2D FFTs are done one axis at a time (pocketfft, multithreaded), fused
+        with the operations between them, and skipping the rows known to be zero:
+        the zero padding below the input field in the forward FFT, and the rows
+        outside the field stop in the inverse FFT. Each pixel of fpsf and
+        pyr_image is accumulated over the steps in order, as in trigger_code().
         '''
-        workers = self.cpp.get_num_threads()
-        n_chunk = len(self._cpp_chunk)
-        s = self.ef.shape[0]
-        for k0 in range(0, self.mod_steps, n_chunk):
-            k1 = min(k0 + n_chunk, self.mod_steps)
-            ffv = self.flux_factor_vector[k0:k1]
-            u = self._cpp_chunk[:k1 - k0]
-            self.cpp.pyr_modulate(self.ef, self.tlt_f, ttexp[k0:k1], u)
-            _transform_inplace(scipy.fft.fft, u[:, :s, :], axis=2, workers=workers)
-            _transform_inplace(scipy.fft.fft, u, axis=1, workers=workers)
-            self.cpp.pyr_focal(u, self.shifted_masked_exp, ffv, self.fpsf)
-            for r0, r1 in self._cpp_stop_rows:
-                _transform_inplace(scipy.fft.ifft, u[:, r0:r1, :], axis=2, norm='forward', workers=workers)
-            _transform_inplace(scipy.fft.ifft, u, axis=1, norm='forward', workers=workers)
-            self.cpp.pyr_pupil(u, ffv, self.dtype(self.ifft_norm), self.pyr_image)
+        self.cpp.pyr_modulation(self.ef, self.tlt_f, ttexp, self.shifted_masked_exp,
+                                self.flux_factor_vector, self.dtype(self.ifft_norm),
+                                self._cpp_stop_rows, self._cpp_chunk, self.fpsf, self.pyr_image)
 
     def post_trigger(self):
         super().post_trigger()
@@ -726,9 +703,9 @@ class ModulatedPyramid(BaseProcessingObj):
                 # the other rows are zero after the mask is applied
                 rows = np.flatnonzero(np.any(self.shifted_masked_exp != 0, axis=1))
                 breaks = np.flatnonzero(np.diff(rows) > 1)
-                self._cpp_stop_rows = [(int(rows[a]), int(rows[b]) + 1) for a, b in
-                                       zip(np.r_[0, breaks + 1], np.r_[breaks, len(rows) - 1])
-                                       if len(rows) > 0]
+                self._cpp_stop_rows = np.array([(rows[a], rows[b] + 1) for a, b in
+                                                zip(np.r_[0, breaks + 1], np.r_[breaks, len(rows) - 1])
+                                                if len(rows) > 0], dtype=np.int64).reshape(-1, 2)
             else:
                 self.u_tlt = np.zeros((self.mod_steps, self.fft_totsize, self.fft_totsize),
                                       dtype=self.complex_dtype)
