@@ -3,6 +3,7 @@ import warnings
 from copy import copy
 from functools import cache
 
+import specula
 from specula import cp, np, array_types
 from specula.base_time_obj import BaseTimeObj
 
@@ -126,8 +127,10 @@ class BaseDataObj(BaseTimeObj):
 
             if target_device_idx >= 0:
                 cloned.xp = cp
+                cloned.cpp = None
             else:
                 cloned.xp = np
+                cloned.cpp = specula.cpp
             cloned.target_device_idx = target_device_idx
 
             self.transferDataTo(cloned, force_reallocation=True)

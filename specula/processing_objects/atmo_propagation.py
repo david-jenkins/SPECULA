@@ -389,6 +389,12 @@ class AtmoPropagation(BaseProcessingObj):
                     output_ef.reset()
 
                 interpolator = self.interpolators[source][layer]
+                if interpolator is not None and interpolator.cpp is not None and not self.doFresnel:
+                    # C++ backend: interpolation and accumulation in a single pass
+                    interpolator.interpolate_accumulate(layer.A, layer.phaseInNm,
+                                                        output_ef.A, output_ef.phaseInNm)
+                    continue
+
                 if interpolator is None:
                     topleft = [(layer.size[0] - self.pixel_pupil_size) // 2, \
                                (layer.size[1] - self.pixel_pupil_size) // 2]

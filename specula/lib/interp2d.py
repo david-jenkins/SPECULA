@@ -1,5 +1,6 @@
 import numpy as np
-from specula import cp, to_xp
+import specula
+from specula import cp, to_xp, cpp_compatible
 from scipy.interpolate import RegularGridInterpolator
 
 class Interp2D():
@@ -146,6 +147,8 @@ class Interp2D():
         self.input_shape = input_shape
         self.output_shape = output_shape
         self.do_interp = True
+        # C++ CPU backend, if enabled
+        self.cpp = specula.cpp if xp is np else None
 
         # Check if interpolation is actually needed
         if (input_shape == output_shape and
@@ -317,9 +320,30 @@ class Interp2D():
 
             return out
 
+        elif self.cpp is not None and cpp_compatible(self.dtype, value, out):
+            self.cpp.interp2d(value, self.xx, self.yy, out)
+            return out
+
         else:
             points = (self.xp.arange( self.input_shape[0], dtype=self.dtype),
                       self.xp.arange( self.input_shape[1], dtype=self.dtype))
             interp = RegularGridInterpolator(points,value, method='linear')
             out[:] = interp((self.yy, self.xx)).reshape(self.output_shape)
             return out
+
+    def interpolate_accumulate(self, amp, phase, amp_out, phase_out):
+        """
+        Multiply amp_out by the interpolated amp and add the interpolated
+        phase to phase_out, as done for each layer by AtmoPropagation.
+
+        With the C++ backend, this is a single pass with no temporary arrays.
+        """
+        if amp.shape != self.input_shape or phase.shape != self.input_shape:
+            raise ValueError(f'Arrays to be interpolated must have shape {self.input_shape}')
+
+        if self.do_interp and self.cpp is not None and \
+                cpp_compatible(self.dtype, amp, phase, amp_out, phase_out):
+            self.cpp.interp2d_accumulate(amp, phase, self.xx, self.yy, amp_out, phase_out)
+        else:
+            amp_out *= self.interpolate(amp)
+            phase_out += self.interpolate(phase)

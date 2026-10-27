@@ -1,49 +1,84 @@
+import contextlib
 import importlib
 import inspect
 import pkgutil
 from astropy.io import fits
 from collections.abc import Mapping, Sequence, Set
 
+import specula
 from specula import cp, np
 import specula.data_objects
 import specula.processing_objects
 
+
+@contextlib.contextmanager
+def cpp_backend(enabled):
+    '''
+    Context manager to create objects with the C++ CPU backend
+    enabled or disabled, restoring the previous state on exit.
+    '''
+    previous = specula.set_cpp_backend(enabled)
+    try:
+        yield
+    finally:
+        specula.set_cpp_backend(previous)
+
+
+def cpp_available():
+    '''True if the C++ CPU backend has been loaded by specula.init()'''
+    return specula._cpp_module is not None
+
+
 def cpu_and_gpu(f):
     '''
-    Decorator to run a test method first on GPU (if available)
-    and the on CPU. If the GPU is not available, it will be
-    skipped silently.
+    Decorator to run a test method first on GPU (if available),
+    then on CPU, and then on CPU with the C++ backend (if available).
+    The GPU and the C++ backend, if not available, are skipped silently.
     '''
     def test_gpu(self):
         return f(self, target_device_idx=0, xp=cp)
-    
+
     def test_cpu(self):
-        return f(self, target_device_idx=-1, xp=np)
-    
+        with cpp_backend(False):
+            return f(self, target_device_idx=-1, xp=np)
+
+    def test_cpu_cpp(self):
+        with cpp_backend(True):
+            return f(self, target_device_idx=-1, xp=np)
+
     def test_both(self):
         if cp is not None:
             test_gpu(self)
         test_cpu(self)
-        
+        if cpp_available():
+            test_cpu_cpp(self)
+
     return test_both
 
 def cpu_and_gpu_noself(f):
     '''
-    Decorator to run a test function first on GPU (if available)
-    and the on CPU. If the GPU is not available, it will be
-    skipped silently.
+    Decorator to run a test function first on GPU (if available),
+    then on CPU, and then on CPU with the C++ backend (if available).
+    The GPU and the C++ backend, if not available, are skipped silently.
     '''
     def test_gpu():
         return f(xp=cp)
-    
+
     def test_cpu():
-        return f(xp=np)
-    
+        with cpp_backend(False):
+            return f(xp=np)
+
+    def test_cpu_cpp():
+        with cpp_backend(True):
+            return f(xp=np)
+
     def test_both():
         if cp is not None:
             test_gpu()
         test_cpu()
-        
+        if cpp_available():
+            test_cpu_cpp()
+
     return test_both
 
 def assert_HDU_contents_match(data_path, ref_path, decimal=5):

@@ -173,6 +173,10 @@ class BaseTimeObj:
     gpu_bytes_used = 0
     gpu_bytes_children = 0
 
+    # C++ CPU backend (specula_cpp module) used by this object, or None.
+    # Not pickled: objects received via MPI use numpy.
+    cpp = None
+
     def __init__(self, target_device_idx=None, precision=None):
         """
         Creates a new base_time object.
@@ -216,6 +220,7 @@ class BaseTimeObj:
             self.complex_dtype = cpu_complex_dtype_list[self.precision]
             self.xp = np
             self.xp_str = 'np'
+            self.cpp = specula.cpp
 
         if self.target_device_idx >= 0:
             from cupyx.scipy.ndimage import rotate as ndimage_rotate
@@ -271,6 +276,8 @@ class BaseTimeObj:
         state = self.__dict__.copy()
         state.pop('_mem_owner', None)
         state.pop('_mem_parent', None)
+        # Modules cannot be pickled
+        state.pop('cpp', None)
         return state
 
     @property

@@ -13,6 +13,8 @@ def main():
                         help='Number of simulations to run')
     parser.add_argument('--cpu', action='store_true',
                         help='Force CPU execution (equivalent to --target=-1)')
+    parser.add_argument('--no-cpp', action='store_true',
+                        help='Do not use the C++ CPU backend (specula_cpp module), even if installed')
     parser.add_argument('--overrides', type=str,
                         help='YAML string with parameter overrides')
     parser.add_argument('--target', type=int, default=0,

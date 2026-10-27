@@ -7,6 +7,7 @@ from specula.lib.radial_profile import (
     get_encircled_energy_at_distance,
 )
 
+from specula import cpp_compatible
 from specula.base_processing_obj import BaseProcessingObj, InputDesc, OutputDesc
 from specula.base_value import BaseValue
 from specula.data_objects.electric_field import ElectricField
@@ -252,8 +253,12 @@ class PSF(BaseProcessingObj):
         if self.current_time_seconds >= self.start_time:
             self.count += 1
             self.int_sr.value += self.sr.value
-            self.int_psf.value += self.psf.value
-            self._sum_psf_squared += self.psf.value ** 2
+            if self.cpp is not None and \
+                    cpp_compatible(self.dtype, self.psf.value, self.int_psf.value, self._sum_psf_squared):
+                self.cpp.accumulate_sum_sq(self.psf.value, self.int_psf.value, self._sum_psf_squared)
+            else:
+                self.int_psf.value += self.psf.value
+                self._sum_psf_squared += self.psf.value ** 2
         self.psf.generation_time = self.current_time
         self.sr.generation_time = self.current_time
 

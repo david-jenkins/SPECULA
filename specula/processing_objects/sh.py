@@ -1,6 +1,7 @@
 import numpy as np
+import scipy.fft
 
-from specula import fuse, RAD2ASEC, cpuArray
+from specula import fuse, RAD2ASEC, cpuArray, cpp_compatible
 from specula.tracing import tracer
 from specula.lib.extrapolation_2d import EFInterpolator
 from specula.lib.toccd import toccd
@@ -28,6 +29,10 @@ def abs2(u_fp, out, xp):
 @fuse(kernel_name='abs2_masked')
 def abs2_masked(u_fp, mask, out, xp):
     out[:] = xp.real(u_fp * xp.conj(u_fp)) * mask
+
+
+# Memory used by the C++ backend for the buffers of a chunk of subaperture rows
+_CPP_CHUNK_BYTES = 64 * 1024 * 1024
 
 
 def choose_fov_resolution(turbulence_pxscale, sensor_pxscale, subap_wanted_fov, subap_npx,
@@ -231,6 +236,8 @@ class SH(BaseProcessingObj):
         self._kernelobj = None
         self._last_sodium_values = None
         self._fov_ovs = 1
+        # Subaperture rows per chunk with the C++ backend (see _setup_cpp()), None without it
+        self._cpp_rows = None
 
         self._ccd_side = self._subap_npx * self._lenslet.n_lenses
         self._out_i = Intensity(self._ccd_side, self._ccd_side,
@@ -523,7 +530,13 @@ class SH(BaseProcessingObj):
         - the kernel convolution uses rfft2/irfft2, since both the PSF and
           the kernels are real, and the kernels are stored as half spectra;
         - all views on the preallocated buffers are built once in setup().
+
+        With the C++ backend, _trigger_code_cpp() is used instead.
         """
+        if self._cpp_rows is not None:
+            self._trigger_code_cpp()
+            return
+
         xp = self.xp
         dimx = self._lenslet.dimx
         rows = self.subap_rows_slice
@@ -574,6 +587,92 @@ class SH(BaseProcessingObj):
             self._out_i.i[:] = toccd(self._psfimage, (self._ccd_side, self._ccd_side),
                                      set_total=0, xp=xp)
 
+    def _setup_cpp(self):
+        '''
+        Matrices and buffers of the C++ backend, see _trigger_code_cpp().
+        '''
+        n, fft_size, cs = self._ovs_np_sub, self._fft_size, self._cutsize
+        dimx = self._lenslet.dimx
+        csize = np.dtype(self.complex_dtype).itemsize
+        rsize = np.dtype(self.dtype).itemsize
+
+        if self._kernelobj is None:
+            # Rows of the DFT matrix giving the FFT cut only. The half-pixel tilt and
+            # the checkerboard of _tltf are separable (see _calc_geometry()), so they
+            # are folded into the matrix: _psfimage is |dft @ subap @ dft.T|^2
+            m = np.arange(n)
+            x = np.arange(-n // 2, n // 2)
+            tilt = np.exp(-2j * np.pi * x / (2 * fft_size)) * (1 - 2 * (m % 2))
+            k = np.arange(self._cutpixels // 2, self._cutpixels // 2 + cs)
+            dft = np.exp(-2j * np.pi * np.outer(k, m) / fft_size) * tilt
+            self._dft = dft.astype(self.complex_dtype)
+            self._dft_t = np.ascontiguousarray(self._dft.T)
+            row_bytes = (n * dimx * n + n * dimx * cs + cs * dimx * cs) * csize
+        else:
+            row_bytes = dimx * fft_size * fft_size * (csize + 3 * rsize) + n * dimx * n * csize
+
+        n_rows = self.subap_rows_slice.stop - self.subap_rows_slice.start
+        self._cpp_rows = min(n_rows, max(1, _CPP_CHUNK_BYTES // row_bytes))
+        rows = self._cpp_rows
+        self._cpp_ef = np.empty((rows * n, dimx * n), dtype=self.complex_dtype)
+        if self._kernelobj is None:
+            self._cpp_t1 = np.empty((rows * n * dimx, cs), dtype=self.complex_dtype)
+            self._cpp_t2 = np.empty((rows, cs, dimx * cs), dtype=self.complex_dtype)
+        else:
+            self._cpp_cube = np.empty((rows * dimx, fft_size, fft_size), dtype=self.complex_dtype)
+            self._cpp_psf = np.empty((rows * dimx, fft_size, fft_size), dtype=self.dtype)
+        if self._apply_mask:
+            self._cpp_mask = self._fp_mask_cut
+        else:
+            self._cpp_mask = np.ones((cs, cs), dtype=self.dtype)
+
+    def _trigger_code_cpp(self):
+        '''
+        trigger_code() with the C++ CPU backend: same result, computing
+        _cpp_rows rows of subapertures at a time (all of them if they fit
+        in _CPP_CHUNK_BYTES):
+
+        - without a convolution kernel, the FFT cut of all the subapertures is
+          computed as two matrix products (the DFT of the cut only, see
+          _setup_cpp()), then |.|^2 and the mask are applied by a C++ kernel;
+        - with a kernel, the zero-padded subapertures are built by a C++ kernel
+          and all the FFTs are batched and multithreaded (scipy.fft).
+        '''
+        cpp = self.cpp
+        n, cs, dimx = self._ovs_np_sub, self._cutsize, self._lenslet.dimx
+        workers = cpp.get_num_threads()
+
+        with tracer('interpolation', self):
+            self.ef_interpolator.interpolate()
+        wf1 = self.ef_interpolator.interpolated_ef()
+
+        for r0 in range(self.subap_rows_slice.start, self.subap_rows_slice.stop, self._cpp_rows):
+            r1 = min(r0 + self._cpp_rows, self.subap_rows_slice.stop)
+            nr = r1 - r0
+            ef = wf1.ef_at_lambda(self.wavelength_in_nm, slicey=np.s_[r0 * n: r1 * n],
+                                  slicex=np.s_[:], out=self._cpp_ef[:nr * n])
+            image = self._psfimage[r0 * cs: r1 * cs]
+
+            if self._kernelobj is None:
+                t1 = np.matmul(ef.reshape(-1, n), self._dft_t, out=self._cpp_t1[:nr * n * dimx])
+                t2 = np.matmul(self._dft, t1.reshape(nr, n, dimx * cs), out=self._cpp_t2[:nr])
+                cpp.abs2_tiled_mask(t2.reshape(nr * cs, dimx * cs), self._cpp_mask, image)
+            else:
+                cube = self._cpp_cube[:nr * dimx]
+                cpp.sh_subap_cube(ef, dimx, self._tltf, cube)
+                cube = scipy.fft.fft2(cube, workers=workers, overwrite_x=True)
+                psf = self._cpp_psf[:nr * dimx]
+                cpp.abs2(cube, psf)
+                psf_fft = scipy.fft.rfft2(psf, workers=workers)
+                psf_fft *= self._kernelobj.kernels[r0 * dimx: r1 * dimx]
+                psf = scipy.fft.irfft2(psf_fft, s=psf.shape[1:], norm='forward', workers=workers,
+                                       overwrite_x=True)
+                cpp.sh_cut_into_image(psf, dimx, self._cutpixels // 2, self._cpp_mask, image)
+
+        with tracer('toccd', self):
+            # set_total=0: no normalization here, it is done in post_trigger()
+            self._out_i.i[:] = toccd(self._psfimage, (self._ccd_side, self._ccd_side),
+                                     set_total=0, xp=np)
 
     def post_trigger(self):
         super().post_trigger()
@@ -648,6 +747,11 @@ class SH(BaseProcessingObj):
         # Assert that our views are actually views and not temporary allocations
         for view in [self._wf3_view, self._subap_cube_view] + self._psfimage_views:
             assert view.base is not None
+
+        if self.cpp is not None and type(self).trigger_code is SH.trigger_code and \
+                cpp_compatible(self.dtype, self._psfimage, self._fp_mask_cut) and \
+                cpp_compatible(self.complex_dtype, self._tltf):
+            self._setup_cpp()
 
         # The CUDA graph is captured at the first trigger(), see prepare_trigger()
         super().build_stream(allow_parallel=False, capture=False)

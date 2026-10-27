@@ -9,6 +9,9 @@
 #########################################################
 
 
+import numpy as np
+
+import specula
 from specula import cp, cpuArray
 from specula.lib.rebin import rebin2d
 
@@ -63,6 +66,10 @@ def toccd(a, newshape, set_total=None, xp=None):
     if xp == cp:
         return toccd_gpu(a, newshape, set_total=set_total)
 
+    if specula.cpp is not None and a.ndim == 2 and len(newshape) == 2 \
+            and a.dtype in (np.float32, np.float64):
+        return toccd_cpp(a, newshape, set_total=set_total)
+
     if len(a.shape) != 2:
         raise ValueError('Input array has shape %s, cannot continue' % str(a.shape))
 
@@ -87,6 +94,25 @@ def toccd(a, newshape, set_total=None, xp=None):
         rebinned_sum = 1
 
     return rebinned / rebinned_sum * set_total
+
+
+def toccd_cpp(a, newshape, set_total=None):
+    '''
+    toccd() with the C++ CPU backend: same values as toccd_gpu(),
+    without allocating the L.C.M. grid.
+    '''
+    a = np.ascontiguousarray(a)
+    out = np.empty(newshape, dtype=a.dtype)
+    total = specula.cpp.toccd(a, out)
+
+    if set_total is None:
+        set_total = a.sum()
+    elif set_total <= 0:
+        return out
+
+    out /= max(total, np.finfo(out.dtype).eps)
+    out *= set_total
+    return out
 
 
 def toccd_gpu(a, newshape, set_total=None):

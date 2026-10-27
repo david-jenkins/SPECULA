@@ -216,6 +216,15 @@ class ElectricField(BaseDataObj):
             slicey = np.s_[:]
         if slicex is None:
             slicex = np.s_[:]
+        if self.cpp is not None:
+            amp = self.field[0, slicey, slicex]
+            phase = self.field[1, slicey, slicex]
+            if out is None:
+                out = np.empty(phase.shape, dtype=self.complex_dtype)
+            if phase.ndim == 2 and phase.dtype == self.dtype and out.dtype == self.complex_dtype:
+                self._check_wavelength_compatibility(wavelengthInNm)
+                self.cpp.ef_at_lambda(amp, phase, self.dtype((2 * np.pi) / wavelengthInNm), out)
+                return out
         phi = self.phi_at_lambda(wavelengthInNm, slicey=slicey, slicex=slicex)
         ef = self.xp.exp(1j * phi, dtype=self.complex_dtype, out=out)
         ef *= self.field[0, slicey, slicex]

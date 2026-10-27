@@ -13,6 +13,8 @@ array_types = []
 
 gpuEnabled = False
 cp = None
+cpp = None          # C++ CPU backend (the specula_cpp module) when enabled, otherwise None
+_cpp_module = None  # specula_cpp module, if it has been imported
 xp = None
 global_precision = None
 float_dtype_list = None
@@ -40,12 +42,18 @@ RAD2ASEC = 1.0 / ASEC2RAD
 # a GPU device (idx>=0).
 # This can be checked later looking at the value of gpuEnabled.
 
+# Objects on the CPU use the C++ backend (the optional specula_cpp module)
+# instead of numpy/scipy for their heaviest computations, if it is enabled.
+# cpp_backend = None enables it if specula_cpp can be imported, unless the
+# SPECULA_DISABLE_CPP environment variable is set.
+
 
 def init(device_idx=-1,
          precision=0,
          rank=None,
          comm=None,
          log_level=logging.INFO,
+         cpp_backend=None,
          ):
     global xp
     global cp
@@ -104,6 +112,17 @@ def init(device_idx=-1,
         logger.info('Default device is CPU')
         xp = np
 
+    if cpp_backend is None and os.environ.get('SPECULA_DISABLE_CPP', 'FALSE') != 'FALSE':
+        logger.info('env variable SPECULA_DISABLE_CPP prevents using the C++ CPU backend.')
+        cpp_backend = False
+    try:
+        set_cpp_backend(cpp_backend is not False)
+    except ImportError:
+        if cpp_backend:
+            raise
+    if cpp is not None:
+        logger.info(f'C++ CPU backend enabled ({cpp.get_num_threads()} threads)')
+
     if cp is not None:
         array_types = [np.ndarray, cp.ndarray]
     else:
@@ -118,6 +137,36 @@ def init(device_idx=-1,
     # Patch cupy's missing RandomState.random() method
     if cp is not None:
         cp.random.RandomState.random = cp.random.RandomState.random_sample
+
+
+def set_cpp_backend(enabled):
+    '''
+    Enable or disable the C++ CPU backend for the objects created from now on.
+    Objects already created keep the backend they were created with.
+
+    Returns True if the backend was enabled before the call.
+    Raises ImportError if enabling it and the specula_cpp module is not installed.
+    '''
+    global cpp
+    global _cpp_module
+    previous = cpp is not None
+    if enabled:
+        if _cpp_module is None:
+            import specula_cpp
+            _cpp_module = specula_cpp
+        cpp = _cpp_module
+    else:
+        cpp = None
+    return previous
+
+
+def cpp_compatible(dtype, *arrays):
+    '''
+    True if all arrays are C-contiguous numpy arrays of the given dtype,
+    as required by the C++ backend kernels, which never convert their inputs.
+    '''
+    return all(isinstance(a, np.ndarray) and a.dtype == dtype and a.flags.c_contiguous
+               for a in arrays)
 
 
 # should be used as less as a possible and preferably outside time critical computations
@@ -206,6 +255,7 @@ def main_simul(yml_files: list,
                trace_sync: bool=False,
                trace_skip: int=0,
                trace_gpu_events: bool=False,
+               no_cpp: bool=False,
                ):
 
     # Set logging level for the "parent" specula logger
@@ -239,7 +289,8 @@ def main_simul(yml_files: list,
     else:
         target_device_idx = target
 
-    init(target_device_idx, precision=precision, rank=rank, comm=comm)
+    init(target_device_idx, precision=precision, rank=rank, comm=comm,
+         cpp_backend=False if no_cpp else None)
     from specula.simul import Simul
 
     if profile:

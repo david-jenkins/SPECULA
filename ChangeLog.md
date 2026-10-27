@@ -9,11 +9,12 @@
 
 ### Interface changes
 
-- ...
+- New `specula.init()` argument `cpp_backend` (`None`: use the C++ CPU backend if installed, `True`: require it, `False`: disable it), `specula.set_cpp_backend()` to change it for the objects created afterwards, and `--no-cpp` command line option. The `SPECULA_DISABLE_CPP` environment variable also disables it.
+- New `Interp2D.interpolate_accumulate()`: multiplies an output amplitude and adds to an output phase the interpolated input amplitude and phase, in a single pass with the C++ backend.
 
 ### Other
 
-- ...
+- Optional C++ CPU backend: the `specula-cpp` package in the `cpp` directory (`pip install ./cpp`, nanobind bindings) provides multithreaded C++ kernels, used by the objects on the CPU when installed. `Interp2D`, `toccd()`, `ElectricField.ef_at_lambda()`, the `EFInterpolator` edge extrapolation, `affine_transform()` (non-permutation case) and `calc_psf()` use them, and the `PSF`, `ModulatedPyramid`, `SH` and `AtmoPropagation` objects have dedicated CPU paths: modulation steps in chunks with batched multithreaded FFTs (pyramid), the FFT cut of all subapertures as a matrix DFT (SH without kernel), batched FFTs (SH with kernel), FFTs that skip the zero padding (PSF), single-pass interpolation and accumulation (propagation). Results are the same as with NumPy up to floating point rounding; an open-loop SCAO simulation with a pyramid, a 20x20 SH and four science cameras is about 8 times faster. `cpu_and_gpu` tests also run with the C++ backend when it is installed.
 
 ## [1.1.0] - 2026-10-20
 

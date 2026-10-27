@@ -1,4 +1,7 @@
-from specula import fuse
+import numpy as np
+import scipy.fft
+
+from specula import fuse, cpp_compatible
 from specula.lib.extrapolation_2d import EFInterpolator
 from specula.lib.interp2d import Interp2D
 
@@ -26,6 +29,10 @@ def pyr1_fused(u_fp, ffv, fpsf, masked_exp, xp):
 def pyr1_abs2(v, norm, ffv, xp):
     v_norm = v * norm
     return xp.real(v_norm * xp.conj(v_norm)) * ffv
+
+
+# Memory used by the C++ backend for the modulated fields of a chunk of modulation steps
+_CPP_CHUNK_BYTES = 64 * 1024 * 1024
 
 
 class ModulatedPyramid(BaseProcessingObj):
@@ -297,6 +304,8 @@ class ModulatedPyramid(BaseProcessingObj):
         self.ttexp = None
         self.ttexp_shape = None
         self.u_tlt = None
+        # Modulated fields of a chunk of modulation steps, with the C++ backend (see setup())
+        self._cpp_chunk = None
         self.roll_array = [self.fft_padding//2, self.fft_padding//2]
         self.roll_axis = [0,1]
         self.ifft_norm = 1.0 / (self.fft_totsize * self.fft_totsize)
@@ -576,29 +585,32 @@ class ModulatedPyramid(BaseProcessingObj):
         # Select the appropriate ttexp slice (no rotation needed!)
         ttexp_current = self.ttexp[rotation_idx]
 
-        # Input electric field with a sub-pixel shift
-        u_tlt_const = self.ef * self.tlt_f
-        # Create the stack of modulated electric fields applying tip-tilt (modulation)
-        tmp = u_tlt_const[self.xp.newaxis, :, :] * ttexp_current
-        self.u_tlt[:, 0:self.ttexp_shape[1], 0:self.ttexp_shape[2]] = tmp
-
         self.pyr_image *=0
         self.fpsf *=0
 
-        for i in range(0, self.mod_steps):
-            # Fourier Transform to propagate to the Focal Plane
-            u_fp = self.xp.fft.fft2(self.u_tlt[i], axes=(-2, -1))
+        if self._cpp_chunk is not None:
+            self._modulation_cpp(ttexp_current)
+        else:
+            # Input electric field with a sub-pixel shift
+            u_tlt_const = self.ef * self.tlt_f
+            # Create the stack of modulated electric fields applying tip-tilt (modulation)
+            tmp = u_tlt_const[self.xp.newaxis, :, :] * ttexp_current
+            self.u_tlt[:, 0:self.ttexp_shape[1], 0:self.ttexp_shape[2]] = tmp
 
-            # Apply the 'fft shifted phase delay' of the pyramid and field stop
-            # Also accumulates the focal plane PSF
-            u_fp_pyr = pyr1_fused(u_fp, self.ffv[i], self.fpsf, self.shifted_masked_exp, xp=self.xp)
+            for i in range(0, self.mod_steps):
+                # Fourier Transform to propagate to the Focal Plane
+                u_fp = self.xp.fft.fft2(self.u_tlt[i], axes=(-2, -1))
 
-            # Inverse Fourier Transform to return to the Pupil Plane
-            # 'forward' normalization is faster and we normalize correctly later in pyr1_abs2()
-            pyr_ef = self.xp.fft.ifft2(u_fp_pyr, axes=(-2, -1), norm='forward')
+                # Apply the 'fft shifted phase delay' of the pyramid and field stop
+                # Also accumulates the focal plane PSF
+                u_fp_pyr = pyr1_fused(u_fp, self.ffv[i], self.fpsf, self.shifted_masked_exp, xp=self.xp)
 
-            # Calculate intensity and apply weighted accumulation for flux correction
-            self.pyr_image += pyr1_abs2(pyr_ef, self.ifft_norm , self.ffv[i], xp=self.xp)
+                # Inverse Fourier Transform to return to the Pupil Plane
+                # 'forward' normalization is faster and we normalize correctly later in pyr1_abs2()
+                pyr_ef = self.xp.fft.ifft2(u_fp_pyr, axes=(-2, -1), norm='forward')
+
+                # Calculate intensity and apply weighted accumulation for flux correction
+                self.pyr_image += pyr1_abs2(pyr_ef, self.ifft_norm , self.ffv[i], xp=self.xp)
 
         # Extract PSF before and after the focal plane mask
         self.psf_bfm.value[:] = self.xp.fft.fftshift(self.fpsf)
@@ -613,6 +625,24 @@ class ModulatedPyramid(BaseProcessingObj):
 
         # Calculate the total optical transmission of the system
         self.transmission.value[:] = self.xp.sum(self.psf_tot.value) / self.xp.sum(self.psf_bfm.value)
+
+    def _modulation_cpp(self, ttexp):
+        '''
+        Modulation steps with the C++ CPU backend, a chunk of steps at a time:
+        same computation as the loop in trigger_code(), with fused C++ kernels
+        between batched, multithreaded FFTs of the whole chunk.
+        '''
+        workers = self.cpp.get_num_threads()
+        n_chunk = len(self._cpp_chunk)
+        for k0 in range(0, self.mod_steps, n_chunk):
+            k1 = min(k0 + n_chunk, self.mod_steps)
+            ffv = self.flux_factor_vector[k0:k1]
+            u = self._cpp_chunk[:k1 - k0]
+            self.cpp.pyr_modulate(self.ef, self.tlt_f, ttexp[k0:k1], u)
+            u = scipy.fft.fft2(u, workers=workers, overwrite_x=True)
+            self.cpp.pyr_focal(u, self.shifted_masked_exp, ffv, self.fpsf)
+            u = scipy.fft.ifft2(u, norm='forward', workers=workers, overwrite_x=True)
+            self.cpp.pyr_pupil(u, ffv, self.dtype(self.ifft_norm), self.pyr_image)
 
     def post_trigger(self):
         super().post_trigger()
@@ -658,8 +688,23 @@ class ModulatedPyramid(BaseProcessingObj):
     def setup(self):
         super().setup()
 
-        self.u_tlt = self.xp.zeros((self.mod_steps, self.fft_totsize, self.fft_totsize), dtype=self.complex_dtype)
+        # The C++ backend computes the modulation steps in chunks, without the
+        # whole stack of modulated fields. Derived classes with their own
+        # trigger_code() use the stack.
+        use_cpp = self.cpp is not None and type(self).trigger_code is ModulatedPyramid.trigger_code
+        if not use_cpp:
+            self.u_tlt = self.xp.zeros((self.mod_steps, self.fft_totsize, self.fft_totsize), dtype=self.complex_dtype)
         self.cache_ttexp()
+        if use_cpp:
+            if cpp_compatible(self.complex_dtype, self.ef, self.tlt_f, self.ttexp, self.shifted_masked_exp) and \
+                    cpp_compatible(self.dtype, self.flux_factor_vector, self.pyr_image, self.fpsf):
+                step_bytes = self.fft_totsize ** 2 * np.dtype(self.complex_dtype).itemsize
+                n_chunk = min(self.mod_steps, max(1, _CPP_CHUNK_BYTES // step_bytes))
+                self._cpp_chunk = np.empty((n_chunk, self.fft_totsize, self.fft_totsize),
+                                           dtype=self.complex_dtype)
+            else:
+                self.u_tlt = np.zeros((self.mod_steps, self.fft_totsize, self.fft_totsize),
+                                      dtype=self.complex_dtype)
 
         # Get input electric field
         in_ef = self.local_inputs['in_ef']

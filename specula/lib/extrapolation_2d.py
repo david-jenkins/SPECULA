@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 from scipy.ndimage import binary_dilation
 
-from specula import to_xp, cpuArray
+from specula import to_xp, cpuArray, cpp_compatible
 from specula.data_objects.electric_field import ElectricField
 from specula.lib.interp2d import Interp2D
 
@@ -435,18 +435,29 @@ class EFInterpolator():
             self.out_ef.A[:] = self.out_ef.A > 0.5
 
         # Phase: apply an intermediate extrapolation to avoid edge effects
-        self.phase_extrapolated[:] = self.in_ef.phaseInNm * \
-            (self.in_ef.A >= self.mask_threshold).astype(int)
+        cpp = self.out_ef.cpp
+        dtype = self.phase_extrapolated.dtype
+        if cpp is not None and \
+                cpp_compatible(dtype, self.in_ef.phaseInNm, self.in_ef.A, self.phase_extrapolated) and \
+                cpp_compatible(np.int32, self.edge_pixels, self.reference_indices) and \
+                cpp_compatible(np.float32, self.coefficients) and \
+                cpp_compatible(np.int64, self.valid_indices):
+            cpp.masked_extrapolation(self.in_ef.phaseInNm, self.in_ef.A, dtype.type(self.mask_threshold),
+                                     self.edge_pixels, self.reference_indices, self.coefficients,
+                                     self.valid_indices, self.phase_extrapolated)
+        else:
+            self.phase_extrapolated[:] = self.in_ef.phaseInNm * \
+                (self.in_ef.A >= self.mask_threshold).astype(int)
 
-        _ = _apply_extrapolation(
-            self.in_ef.phaseInNm,
-            self.edge_pixels,
-            self.reference_indices,
-            self.coefficients,
-            self.valid_indices,
-            out=self.phase_extrapolated,
-            xp=self.xp
-        )
+            _ = _apply_extrapolation(
+                self.in_ef.phaseInNm,
+                self.edge_pixels,
+                self.reference_indices,
+                self.coefficients,
+                self.valid_indices,
+                out=self.phase_extrapolated,
+                xp=self.xp
+            )
 
         if self.debug_output:
             # compare input and extrapolated phase

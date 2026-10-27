@@ -1,5 +1,6 @@
 from collections import namedtuple
 
+import specula
 from specula import cpuArray, process_comm
 from specula import np, cp
 from specula.lib.utils import flatten
@@ -111,6 +112,7 @@ class _InputItem():
                 new_value.xp = cp
             else:
                 new_value.xp = np
+                new_value.cpp = specula.cpp
         else:            
             self.logger.mpi_send_debug(f'Recv with Buffer')
             new_value = self.cloned_value

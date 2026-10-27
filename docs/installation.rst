@@ -80,6 +80,7 @@ in an inconsistent state.
 
 **Without GPU:**
    SPECULA will automatically fall back to CPU computation using NumPy. Performance will be slower but all functionality remains available.
+   The optional C++ CPU backend (see :ref:`cpp_backend` below) makes CPU simulations several times faster.
 
 Step 3: Install SPECULA
 -----------------------
@@ -167,6 +168,33 @@ Transfer function system management
 
    # Install control library
    pip install control
+
+.. _cpp_backend:
+
+C++ CPU backend
+"""""""""""""""
+
+* **specula-cpp**: multithreaded C++ kernels for the objects running on the CPU
+
+When the ``specula_cpp`` module is installed, objects on the CPU (``target_device_idx=-1``)
+use it instead of NumPy/SciPy for their heaviest computations: interpolations, rebinning,
+electric fields, and the per-step work of the ``PSF``, ``ModulatedPyramid``, ``SH``,
+``AtmoPropagation`` and ``AtmoEvolution`` objects. Results are the same up to floating
+point rounding. For example, an open-loop SCAO simulation with a pyramid, a 20x20 SH and
+four science cameras runs about 8 times faster than with NumPy.
+
+It is built from the ``cpp`` directory of the source repository, and needs a C++17
+compiler (CMake, nanobind and scikit-build-core are installed automatically during the build):
+
+.. code-block:: bash
+
+   # From the root of the SPECULA repository
+   pip install ./cpp
+
+The backend is enabled automatically when the module is installed. To disable it, use the
+``--no-cpp`` command line option, set the ``SPECULA_DISABLE_CPP`` environment variable, or
+call ``specula.init(..., cpp_backend=False)``. The number of threads defaults to the CPUs
+available to the process, and can be set with the ``SPECULA_CPP_THREADS`` environment variable.
 
 Environment Management
 ----------------------
