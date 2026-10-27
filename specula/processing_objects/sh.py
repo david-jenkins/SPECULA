@@ -238,6 +238,7 @@ class SH(BaseProcessingObj):
         self._fov_ovs = 1
         # Subaperture rows per chunk with the C++ backend (see _setup_cpp()), None without it
         self._cpp_rows = None
+        self._cpp_otf = False
 
         self._ccd_side = self._subap_npx * self._lenslet.n_lenses
         self._out_i = Intensity(self._ccd_side, self._ccd_side,
@@ -609,7 +610,24 @@ class SH(BaseProcessingObj):
             self._dft_t = np.ascontiguousarray(self._dft.T)
             row_bytes = (n * dimx * n + n * dimx * cs + cs * dimx * cs) * csize
         else:
-            row_bytes = dimx * fft_size * fft_size * (csize + 3 * rsize) + n * dimx * n * csize
+            # The spectrum of |FFT|^2 is the autocorrelation of the subaperture field,
+            # zero beyond the lags |l| < n. If these are few compared with the FFT size,
+            # the kernel convolution is done on them only, and evaluated at the cut
+            # pixels only (the "OTF path", see _trigger_code_cpp())
+            lags = 2 * n - 1
+            self._otf_size = scipy.fft.next_fast_len(lags)
+            self._cpp_otf = 2 * self._otf_size <= fft_size
+            if self._cpp_otf:
+                lag = np.arange(-(n - 1), n)
+                pix = np.arange(self._cutpixels // 2, self._cutpixels // 2 + cs)
+                dft = np.exp(2j * np.pi * np.outer(pix, lag) / fft_size)
+                self._dft = dft.astype(self.complex_dtype)
+                self._dft_t = np.ascontiguousarray(self._dft.T)
+                m = self._otf_size
+                row_bytes = dimx * (m * m * (2 * csize + rsize) + lags * lags * csize +
+                                    cs * lags * csize + cs * cs * (csize + rsize)) + n * dimx * n * csize
+            else:
+                row_bytes = dimx * fft_size * fft_size * (csize + 3 * rsize) + n * dimx * n * csize
 
         n_rows = self.subap_rows_slice.stop - self.subap_rows_slice.start
         self._cpp_rows = min(n_rows, max(1, _CPP_CHUNK_BYTES // row_bytes))
@@ -618,6 +636,13 @@ class SH(BaseProcessingObj):
         if self._kernelobj is None:
             self._cpp_t1 = np.empty((rows * n * dimx, cs), dtype=self.complex_dtype)
             self._cpp_t2 = np.empty((rows, cs, dimx * cs), dtype=self.complex_dtype)
+        elif self._cpp_otf:
+            m, lags = self._otf_size, 2 * n - 1
+            self._cpp_cube = np.empty((rows * dimx, m, m), dtype=self.complex_dtype)
+            self._cpp_psf = np.empty((rows * dimx, m, m), dtype=self.dtype)
+            self._cpp_otf_k = np.empty((rows * dimx, lags, lags), dtype=self.complex_dtype)
+            self._cpp_t1 = np.empty((rows * dimx, cs, lags), dtype=self.complex_dtype)
+            self._cpp_t2 = np.empty((rows * dimx, cs, cs), dtype=self.complex_dtype)
         else:
             self._cpp_cube = np.empty((rows * dimx, fft_size, fft_size), dtype=self.complex_dtype)
             self._cpp_psf = np.empty((rows * dimx, fft_size, fft_size), dtype=self.dtype)
@@ -635,8 +660,13 @@ class SH(BaseProcessingObj):
         - without a convolution kernel, the FFT cut of all the subapertures is
           computed as two matrix products (the DFT of the cut only, see
           _setup_cpp()), then |.|^2 and the mask are applied by a C++ kernel;
-        - with a kernel, the zero-padded subapertures are built by a C++ kernel
-          and all the FFTs are batched and multithreaded (scipy.fft).
+        - with a kernel and the "OTF path" (see _setup_cpp()), the autocorrelation
+          of each subaperture field is computed with FFTs of size _otf_size, multiplied
+          by the kernel spectrum at the same lags (C++ kernel), and transformed back
+          at the cut pixels only with two matrix products. Same result as convolving
+          the zero-padded |FFT|^2 with the kernel and cutting it;
+        - otherwise, with a kernel, the zero-padded subapertures are built by a C++
+          kernel and all the FFTs are batched and multithreaded (scipy.fft).
         '''
         cpp = self.cpp
         n, cs, dimx = self._ovs_np_sub, self._cutsize, self._lenslet.dimx
@@ -657,6 +687,20 @@ class SH(BaseProcessingObj):
                 t1 = np.matmul(ef.reshape(-1, n), self._dft_t, out=self._cpp_t1[:nr * n * dimx])
                 t2 = np.matmul(self._dft, t1.reshape(nr, n, dimx * cs), out=self._cpp_t2[:nr])
                 cpp.abs2_tiled_mask(t2.reshape(nr * cs, dimx * cs), self._cpp_mask, image)
+            elif self._cpp_otf:
+                b = nr * dimx
+                cube = self._cpp_cube[:b]
+                cpp.sh_subap_cube(ef, dimx, self._tltf, cube)
+                cube = scipy.fft.fft2(cube, workers=workers, overwrite_x=True)
+                cpp.abs2(cube, self._cpp_psf[:b])
+                autocorr = scipy.fft.ifft2(self._cpp_psf[:b], workers=workers)
+                otf_k = self._cpp_otf_k[:b]
+                kernels = np.ascontiguousarray(self._kernelobj.kernels[r0 * dimx: r1 * dimx],
+                                               dtype=self.complex_dtype)
+                cpp.sh_otf_product(autocorr, kernels, self._fft_size, self.dtype(self._fft_size ** 2), otf_k)
+                t1 = np.matmul(self._dft, otf_k, out=self._cpp_t1[:b])
+                t2 = np.matmul(t1, self._dft_t, out=self._cpp_t2[:b])
+                cpp.sh_cut_into_image(np.ascontiguousarray(t2.real), dimx, 0, self._cpp_mask, image)
             else:
                 cube = self._cpp_cube[:nr * dimx]
                 cpp.sh_subap_cube(ef, dimx, self._tltf, cube)

@@ -38,6 +38,13 @@ class PSF(BaseProcessingObj):
         based on the input ElectricField and numerical density.
     start_time : float [s], optional
         Time (in seconds) after which to start integrating PSF and SR. Default is 0.0.
+    psf_dt : float [s], optional
+        Time interval between PSF computations. Default is None: the PSF is computed
+        at every step. With a longer interval, the instantaneous PSF is updated, and
+        the integrated PSF and its standard deviation are accumulated, only every
+        psf_dt: an approximation of the long exposure, faster with many or large PSFs.
+        The SR and the integrated SR are still computed at every step, exactly
+        (from the PSF peak, which does not need the whole PSF).
     compute_profile_metrics : bool
         If True, also compute radial profile, FWHM and encircled-energy outputs.
         By default these summary metrics are evaluated in `finalize()` only.
@@ -59,6 +66,7 @@ class PSF(BaseProcessingObj):
                  nd: float=None,
                  pixel_size_mas: float=None,
                  start_time: float=0.0,
+                 psf_dt: float=None,
                  compute_profile_metrics: bool=False,
                  compute_metrics_in_trigger: bool=False,
                  ee_radius_in_lambda_d=None,
@@ -79,6 +87,14 @@ class PSF(BaseProcessingObj):
                                             pixel_size_mas)
 
         self.start_time = start_time
+        if psf_dt is not None and psf_dt <= 0:
+            raise ValueError('psf_dt must be >0')
+        self.psf_dt = None if psf_dt is None else self.seconds_to_t(psf_dt)
+        self._last_psf_time = None
+        # True if the PSF has been computed in the current step
+        self._psf_computed = False
+        # Number of PSFs integrated (self.count counts all the integrated steps)
+        self._psf_count = 0
         self.compute_profile_metrics = compute_profile_metrics
         self.compute_metrics_in_trigger = compute_metrics_in_trigger
         self.ee_radius_in_lambda_d = ee_radius_in_lambda_d
@@ -181,13 +197,24 @@ class PSF(BaseProcessingObj):
 
     def trigger_code(self):
         in_ef = self.local_inputs['in_ef']
-        self.psf.value, self.total_psf = calc_psf(in_ef.phi_at_lambda(self.wavelengthInNm),
-                                                  in_ef.A, imwidth=self.out_size[0], normalize=True,
-                                                  xp=self.xp, complex_dtype=self.complex_dtype,
-                                                  return_total=True)
-        self.sr.value = self.psf.value[self.out_size[0] // 2, \
-                                       self.out_size[1] // 2] / self.ref.i[self.out_size[0] // 2, \
-                                       self.out_size[1] // 2]
+        center = (self.out_size[0] // 2, self.out_size[1] // 2)
+        self._psf_computed = self.psf_dt is None or self._last_psf_time is None or \
+            self.current_time - self._last_psf_time >= self.psf_dt
+        if self._psf_computed:
+            self._last_psf_time = self.current_time
+            self.psf.value, self.total_psf = calc_psf(in_ef.phi_at_lambda(self.wavelengthInNm),
+                                                      in_ef.A, imwidth=self.out_size[0], normalize=True,
+                                                      xp=self.xp, complex_dtype=self.complex_dtype,
+                                                      return_total=True)
+            peak = self.psf.value[center]
+        else:
+            # Peak of the normalized PSF, without the PSF: the zero frequency
+            # of the FFT of the field, divided by the PSF total (Parseval)
+            ef = in_ef.ef_at_lambda(self.wavelengthInNm)
+            peak = self.xp.abs(ef.sum(dtype=np.complex128)) ** 2 / \
+                (self.out_size[0] ** 2 * self.xp.sum(ef.real ** 2 + ef.imag ** 2, dtype=np.float64))
+            peak = peak.astype(self.dtype)
+        self.sr.value = peak / self.ref.i[center]
         self.logger.info(f'SR at {int(self.wavelengthInNm)}nm : {self.sr.value}')
 
     def _compute_radial_profile_data(self, psf, peak:float=None):
@@ -253,16 +280,19 @@ class PSF(BaseProcessingObj):
         if self.current_time_seconds >= self.start_time:
             self.count += 1
             self.int_sr.value += self.sr.value
-            if self.cpp is not None and \
-                    cpp_compatible(self.dtype, self.psf.value, self.int_psf.value, self._sum_psf_squared):
-                self.cpp.accumulate_sum_sq(self.psf.value, self.int_psf.value, self._sum_psf_squared)
-            else:
-                self.int_psf.value += self.psf.value
-                self._sum_psf_squared += self.psf.value ** 2
-        self.psf.generation_time = self.current_time
+            if self._psf_computed:
+                self._psf_count += 1
+                if self.cpp is not None and \
+                        cpp_compatible(self.dtype, self.psf.value, self.int_psf.value, self._sum_psf_squared):
+                    self.cpp.accumulate_sum_sq(self.psf.value, self.int_psf.value, self._sum_psf_squared)
+                else:
+                    self.int_psf.value += self.psf.value
+                    self._sum_psf_squared += self.psf.value ** 2
+        if self._psf_computed:
+            self.psf.generation_time = self.current_time
         self.sr.generation_time = self.current_time
 
-        if self.compute_profile_metrics and self.compute_metrics_in_trigger:
+        if self.compute_profile_metrics and self.compute_metrics_in_trigger and self._psf_computed:
             self._set_profile_outputs(
                 self.psf.value,
                 self.psf_profile,
@@ -273,9 +303,10 @@ class PSF(BaseProcessingObj):
 
     def finalize(self):
         if self.count > 0:
-            self.int_psf.value /= self.count
             self.int_sr.value /= self.count
-            variance = self._sum_psf_squared / self.count - self.int_psf.value ** 2
+        if self._psf_count > 0:
+            self.int_psf.value /= self._psf_count
+            variance = self._sum_psf_squared / self._psf_count - self.int_psf.value ** 2
             self.std_psf.value = self.xp.sqrt(self.xp.maximum(variance, 0))
             if self.compute_profile_metrics:
                 self._set_profile_outputs(

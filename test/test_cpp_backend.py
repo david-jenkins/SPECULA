@@ -204,17 +204,21 @@ class TestCppBackend(unittest.TestCase):
     def test_pyramid_alternating(self):
         self.run_pyramid(n_steps=3, mod_type='alternating')
 
-    def run_sh(self, laser_launch_tel=None, subap_rows_slice=None):
+    def run_sh(self, laser_launch_tel=None, subap_rows_slice=None, otf=False,
+               pupil=(160, 0.05), **kwargs):
+        args = dict(wavelengthInNm=750, subap_wanted_fov=1.2, sensor_pxscale=0.15,
+                    subap_on_diameter=20, subap_npx=6)
+        args.update(kwargs)
+
         def f():
-            ef = pupil_field(160, 0.05, 50, seed=9)
+            ef = pupil_field(*pupil, 50, seed=9)
             with tempfile.TemporaryDirectory() as data_dir:
-                shobj = SH(wavelengthInNm=750, subap_wanted_fov=1.2, sensor_pxscale=0.15,
-                           subap_on_diameter=20, subap_npx=6, laser_launch_tel=laser_launch_tel,
-                           subap_rows_slice=subap_rows_slice, data_dir=data_dir,
-                           target_device_idx=-1, precision=1)
+                shobj = SH(laser_launch_tel=laser_launch_tel, subap_rows_slice=subap_rows_slice,
+                           data_dir=data_dir, target_device_idx=-1, precision=1, **args)
                 shobj.inputs['in_ef'].set(ef)
                 run_steps(shobj, [ef], 2)
             self.assertEqual(shobj._cpp_rows is not None, specula.cpp is not None)
+            self.assertEqual(shobj._cpp_otf, otf and specula.cpp is not None)
             return shobj.outputs['out_i'].i.copy()
         ref, new = numpy_and_cpp(f)
         self.assert_close(new, ref, 1e-5)
@@ -230,7 +234,18 @@ class TestCppBackend(unittest.TestCase):
             self.run_sh(subap_rows_slice=slice(3, 17))
 
     def test_sh_lgs_kernel(self):
-        self.run_sh(laser_launch_tel=LaserLaunchTelescope(spot_size=1.0))
+        # 16 pixels per subaperture in a 112 pixels FFT: the OTF path is used
+        self.run_sh(laser_launch_tel=LaserLaunchTelescope(spot_size=1.0), otf=True)
+
+    def test_sh_lgs_kernel_otf_rows(self):
+        self.run_sh(laser_launch_tel=LaserLaunchTelescope(spot_size=1.0), otf=True,
+                    subap_rows_slice=slice(2, 15))
+
+    def test_sh_lgs_kernel_fft_path(self):
+        # 48 pixels per subaperture in a 96 pixels FFT: the OTF would not be smaller
+        self.run_sh(laser_launch_tel=LaserLaunchTelescope(spot_size=1.0), pupil=(64, 0.1),
+                    wavelengthInNm=589, subap_wanted_fov=7.2, sensor_pxscale=1.2,
+                    subap_on_diameter=8)
 
     def test_atmo_propagation(self):
         def f():

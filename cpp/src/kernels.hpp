@@ -399,6 +399,34 @@ void sh_subap_cube(const std::complex<T> *ef, idx rows, idx dimx, idx n,
     });
 }
 
+// SH with a convolution kernel, on the support of the OTF only: product of the
+// autocorrelation of each subaperture field and of its kernel, at the lags |l| <= L.
+// A[b] is the inverse FFT (size M >= 2L+1) of |FFT(w)|^2, so A[b][l] = sum_y w[y+l] conj(w[y]);
+// Kh[b] is the half spectrum (rfft2 layout) of the real kernel on the N x N FFT grid.
+// Q[b][L+ly][L+lx] = scale * A[b][-ly][-lx] * K(ly, lx), with K(ly, lx) = Kh[ly][lx] for lx >= 0
+// and conj(Kh[-ly][-lx]) for lx < 0 (indices modulo M for A, modulo N for Kh).
+template <class T>
+void sh_otf_product(const std::complex<T> *A, idx B, idx M, const std::complex<T> *Kh, idx N,
+                    idx NH, idx L, T scale, std::complex<T> *Q) {
+    idx S = 2 * L + 1;
+    auto mod = [](idx a, idx m) { return ((a % m) + m) % m; };
+    parallel_for(B * S, rows_grain(S), [&](idx r0, idx r1) {
+        for (idx r = r0; r < r1; ++r) {
+            idx b = r / S, ly = r % S - L;
+            const std::complex<T> *a = A + (b * M + mod(-ly, M)) * M;
+            const std::complex<T> *kp = Kh + (b * N + mod(ly, N)) * NH;   // lx >= 0
+            const std::complex<T> *kn = Kh + (b * N + mod(-ly, N)) * NH;  // lx < 0
+            std::complex<T> *q = Q + r * S;
+            for (idx j = 0; j < S; ++j) {
+                idx lx = j - L;
+                std::complex<T> k = lx >= 0 ? kp[lx] : std::conj(kn[-lx]);
+                std::complex<T> v = cmul(a[mod(-lx, M)], k);
+                q[j] = {v.real() * scale, v.imag() * scale};
+            }
+        }
+    });
+}
+
 // image[r*cs + y][sx*cs + x] = psf[r*dimx + sx][c0 + y][c0 + x] * mask[y][x]
 template <class T>
 void sh_cut_into_image(const T *psf, idx rows, idx dimx, idx fft, idx c0, idx cs, const T *mask,

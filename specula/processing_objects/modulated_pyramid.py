@@ -31,8 +31,20 @@ def pyr1_abs2(v, norm, ffv, xp):
     return xp.real(v_norm * xp.conj(v_norm)) * ffv
 
 
-# Memory used by the C++ backend for the modulated fields of a chunk of modulation steps
-_CPP_CHUNK_BYTES = 64 * 1024 * 1024
+# Memory used by the C++ backend for the modulated fields of a chunk of modulation steps.
+# Small enough for a chunk to stay in cache between the FFT passes and the C++ kernels.
+_CPP_CHUNK_BYTES = 16 * 1024 * 1024
+
+
+def _transform_inplace(transform, view, **kwargs):
+    '''
+    Apply a scipy.fft transform to view, in place. scipy works in place on
+    contiguous and strided views when allowed to overwrite them, but this
+    is not guaranteed: a new result array is copied back.
+    '''
+    out = transform(view, overwrite_x=True, **kwargs)
+    if not np.may_share_memory(out, view):
+        view[...] = out
 
 
 class ModulatedPyramid(BaseProcessingObj):
@@ -631,17 +643,25 @@ class ModulatedPyramid(BaseProcessingObj):
         Modulation steps with the C++ CPU backend, a chunk of steps at a time:
         same computation as the loop in trigger_code(), with fused C++ kernels
         between batched, multithreaded FFTs of the whole chunk.
+
+        The 2D FFTs are done one axis at a time, so that the row transforms skip
+        the rows known to be zero: the zero padding below the input field in the
+        forward FFT, and the rows outside the field stop in the inverse FFT.
         '''
         workers = self.cpp.get_num_threads()
         n_chunk = len(self._cpp_chunk)
+        s = self.ef.shape[0]
         for k0 in range(0, self.mod_steps, n_chunk):
             k1 = min(k0 + n_chunk, self.mod_steps)
             ffv = self.flux_factor_vector[k0:k1]
             u = self._cpp_chunk[:k1 - k0]
             self.cpp.pyr_modulate(self.ef, self.tlt_f, ttexp[k0:k1], u)
-            u = scipy.fft.fft2(u, workers=workers, overwrite_x=True)
+            _transform_inplace(scipy.fft.fft, u[:, :s, :], axis=2, workers=workers)
+            _transform_inplace(scipy.fft.fft, u, axis=1, workers=workers)
             self.cpp.pyr_focal(u, self.shifted_masked_exp, ffv, self.fpsf)
-            u = scipy.fft.ifft2(u, norm='forward', workers=workers, overwrite_x=True)
+            for r0, r1 in self._cpp_stop_rows:
+                _transform_inplace(scipy.fft.ifft, u[:, r0:r1, :], axis=2, norm='forward', workers=workers)
+            _transform_inplace(scipy.fft.ifft, u, axis=1, norm='forward', workers=workers)
             self.cpp.pyr_pupil(u, ffv, self.dtype(self.ifft_norm), self.pyr_image)
 
     def post_trigger(self):
@@ -702,6 +722,13 @@ class ModulatedPyramid(BaseProcessingObj):
                 n_chunk = min(self.mod_steps, max(1, _CPP_CHUNK_BYTES // step_bytes))
                 self._cpp_chunk = np.empty((n_chunk, self.fft_totsize, self.fft_totsize),
                                            dtype=self.complex_dtype)
+                # Ranges of focal plane rows with some pixel inside the field stop:
+                # the other rows are zero after the mask is applied
+                rows = np.flatnonzero(np.any(self.shifted_masked_exp != 0, axis=1))
+                breaks = np.flatnonzero(np.diff(rows) > 1)
+                self._cpp_stop_rows = [(int(rows[a]), int(rows[b]) + 1) for a, b in
+                                       zip(np.r_[0, breaks + 1], np.r_[breaks, len(rows) - 1])
+                                       if len(rows) > 0]
             else:
                 self.u_tlt = np.zeros((self.mod_steps, self.fft_totsize, self.fft_totsize),
                                       dtype=self.complex_dtype)
