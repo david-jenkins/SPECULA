@@ -290,21 +290,6 @@ void accumulate_sum_sq(const T *v, T *sum, T *sum_sq, idx n) {
 // ---------------------------------------------------------------------------
 // SH
 
-// out[r, c] = |in[r, c]|^2 * mask[r % mr, c % mc]
-template <class T>
-void abs2_tiled_mask(const std::complex<T> *in, idx rows, idx cols, const T *mask, idx mr,
-                     idx mcols, T *out) {
-    parallel_for(rows, rows_grain(cols), [&](idx r0, idx r1) {
-        for (idx r = r0; r < r1; ++r) {
-            const std::complex<T> *src = in + r * cols;
-            const T *mrow = mask + (r % mr) * mcols;
-            T *dst = out + r * cols;
-            for (idx c = 0; c < cols; ++c)
-                dst[c] = abs2(src[c]) * mrow[c % mcols];
-        }
-    });
-}
-
 template <class T>
 void abs2_array(const std::complex<T> *in, idx n, T *out) {
     parallel_for(n, kGrain, [&](idx b, idx e) {
@@ -360,6 +345,66 @@ void sh_otf_product(const std::complex<T> *A, idx B, idx M, const std::complex<T
                 std::complex<T> k = lx >= 0 ? kp[lx] : std::conj(kn[-lx]);
                 std::complex<T> v = cmul(a[mod(-lx, M)], k);
                 q[j] = {v.real() * scale, v.imag() * scale};
+            }
+        }
+    });
+}
+
+// SH FFT cut as two small matrix products (without BLAS, whose spinning threads
+// would compete with the thread pool): for each subaperture b = r*dimx + sx,
+// P = L X_b R with L: cs x q, X_b: q x q, R: q x cs, and
+// image[r*cs + y][sx*cs + x] = f(P[y][x]) * mask[y][x], f = |.|^2 if use_abs2, else the real part.
+// X_b[i][j] = x[r * row_step + sx * col_step + i * x_stride + j]. X_b R is computed first.
+template <class T>
+void sh_dft_image(const std::complex<T> *x, idx rows, idx dimx, idx q, idx row_step, idx col_step,
+                  idx x_stride, const std::complex<T> *L, const std::complex<T> *R, idx cs,
+                  bool use_abs2, const T *mask, T *image) {
+    // Real and imaginary planes, so that the inner loops (over a row of cs) vectorize
+    std::vector<T> rr(q * cs), ri(q * cs);
+    for (idx i = 0; i < q * cs; ++i) {
+        rr[i] = R[i].real();
+        ri[i] = R[i].imag();
+    }
+    idx width = dimx * cs;
+    parallel_for(rows * dimx, rows_grain(q * q * cs), [&](idx b0, idx b1) {
+        std::vector<T> tr(q * cs), ti(q * cs), pr(cs), pi(cs);
+        for (idx b = b0; b < b1; ++b) {
+            idx r = b / dimx, sx = b % dimx;
+            const std::complex<T> *xb = x + r * row_step + sx * col_step;
+            // T = X_b R
+            for (idx i = 0; i < q; ++i) {
+                T *tri = tr.data() + i * cs, *tii = ti.data() + i * cs;
+                std::fill(tri, tri + cs, T(0));
+                std::fill(tii, tii + cs, T(0));
+                for (idx j = 0; j < q; ++j) {
+                    T a = xb[i * x_stride + j].real(), c = xb[i * x_stride + j].imag();
+                    const T *rrj = rr.data() + j * cs, *rij = ri.data() + j * cs;
+                    for (idx k = 0; k < cs; ++k) {
+                        tri[k] += a * rrj[k] - c * rij[k];
+                        tii[k] += a * rij[k] + c * rrj[k];
+                    }
+                }
+            }
+            // Row y of P = L T, into the image
+            for (idx y = 0; y < cs; ++y) {
+                std::fill(pr.begin(), pr.end(), T(0));
+                std::fill(pi.begin(), pi.end(), T(0));
+                for (idx i = 0; i < q; ++i) {
+                    T a = L[y * q + i].real(), c = L[y * q + i].imag();
+                    const T *tri = tr.data() + i * cs, *tii = ti.data() + i * cs;
+                    for (idx k = 0; k < cs; ++k) {
+                        pr[k] += a * tri[k] - c * tii[k];
+                        pi[k] += a * tii[k] + c * tri[k];
+                    }
+                }
+                T *dst = image + (r * cs + y) * width + sx * cs;
+                const T *mrow = mask + y * cs;
+                if (use_abs2)
+                    for (idx k = 0; k < cs; ++k)
+                        dst[k] = (pr[k] * pr[k] + pi[k] * pi[k]) * mrow[k];
+                else
+                    for (idx k = 0; k < cs; ++k)
+                        dst[k] = pr[k] * mrow[k];
             }
         }
     });

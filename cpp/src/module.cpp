@@ -272,19 +272,37 @@ void py_pyr_modulation(in_array<cplx<T>> ef, in_array<cplx<T>> tlt_f, in_array<c
     pyr_modulation(pe, pf, pt, m, s, pm, pw, norm, pr, n_ranges, pc, nc, t, pp, pi);
 }
 
+// x: the field of rows of q x q subapertures, shape (rows * q, dimx * q), or a cube
+// of subapertures, shape (rows * dimx, q, q)
 template <class T>
-void py_abs2_tiled_mask(in_array<cplx<T>> in, in_array<T> mask, out_array<T> out) {
-    require(in.ndim() == 2 && mask.ndim() == 2, "input and mask must be 2D");
-    require_shape(out, {dim(in, 0), dim(in, 1)}, "out");
-    require(dim(mask, 0) > 0 && dim(mask, 1) > 0 && dim(in, 0) % dim(mask, 0) == 0 &&
-                dim(in, 1) % dim(mask, 1) == 0,
-            "the mask must tile the input");
-    const cplx<T> *pi = in.data();
+void py_sh_dft_image(in_array<cplx<T>> x, idx dimx, in_array<cplx<T>> L, in_array<cplx<T>> R,
+                     bool use_abs2, in_array<T> mask, out_array<T> image) {
+    require(L.ndim() == 2, "L must be 2D");
+    idx cs = dim(L, 0), q = dim(L, 1);
+    require_shape(R, {q, cs}, "R");
+    require_shape(mask, {cs, cs}, "mask");
+    require(dimx > 0 && q > 0, "dimx and the size of L must be > 0");
+    idx rows, row_step, col_step, x_stride;
+    if (x.ndim() == 2) {
+        require(dim(x, 1) == dimx * q && dim(x, 0) % q == 0, "x must have shape (rows * q, dimx * q)");
+        rows = dim(x, 0) / q;
+        x_stride = dimx * q;
+        row_step = q * x_stride;
+        col_step = q;
+    } else {
+        require(x.ndim() == 3 && dim(x, 1) == q && dim(x, 2) == q && dim(x, 0) % dimx == 0,
+                "x must have shape (rows * dimx, q, q)");
+        rows = dim(x, 0) / dimx;
+        x_stride = q;
+        col_step = q * q;
+        row_step = dimx * col_step;
+    }
+    require_shape(image, {rows * cs, dimx * cs}, "image");
+    const cplx<T> *px = x.data(), *pl = L.data(), *pr = R.data();
     const T *pm = mask.data();
-    T *po = out.data();
-    idx rows = dim(in, 0), cols = dim(in, 1), mr = dim(mask, 0), mcols = dim(mask, 1);
+    T *pi = image.data();
     nb::gil_scoped_release release;
-    abs2_tiled_mask(pi, rows, cols, pm, mr, mcols, po);
+    sh_dft_image(px, rows, dimx, q, row_step, col_step, x_stride, pl, pr, cs, use_abs2, pm, pi);
 }
 
 template <class T>
@@ -361,13 +379,14 @@ void bind_real(nb::module_ &m) {
     m.def("accumulate_sum_sq", &py_accumulate_sum_sq<T>, a("value"), a("total"), a("total_sq"));
     m.def("pyr_modulation", &py_pyr_modulation<T>, a("ef"), a("tlt_f"), a("ttexp"), a("mask"), a("ffv"),
           nb::arg("norm"), a("stop_rows"), a("chunk"), a("fpsf"), a("image"));
-    m.def("abs2_tiled_mask", &py_abs2_tiled_mask<T>, a("input"), a("mask"), a("out"));
     m.def("abs2", &py_abs2<T>, a("input"), a("out"));
     m.def("sh_subap_cube", &py_sh_subap_cube<T>, a("ef"), nb::arg("dimx"), a("tltf"), a("out"));
     m.def("sh_otf_product", &py_sh_otf_product<T>, a("A"), a("Kh"), nb::arg("N"), nb::arg("scale"),
           a("Q"));
     m.def("sh_cut_into_image", &py_sh_cut_into_image<T>, a("psf"), nb::arg("dimx"), nb::arg("c0"),
           a("mask"), a("image"));
+    m.def("sh_dft_image", &py_sh_dft_image<T>, a("x"), nb::arg("dimx"), a("L"), a("R"),
+          nb::arg("use_abs2"), a("mask"), a("image"));
 }
 
 }  // namespace

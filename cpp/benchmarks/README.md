@@ -50,8 +50,8 @@ approximates the long-exposure PSF; the Strehl ratios are still exact at every s
 
 ## How to repeat it
 
-1. Check out the commit to measure. The reference results below are for `de3be45`
-   on the `cpp-cpu-backend` branch.
+1. Check out the commit to measure. The reference results below say which commit
+   of the `cpp-cpu-backend` branch they are for.
 
 2. Create a clean virtual environment with SPECULA's dependencies, and build the
    C++ backend (needs a C++17 compiler; CMake, nanobind and scikit-build-core are
@@ -86,7 +86,60 @@ single precision (`precision=1`), as in the default `specula` command line.
 
 ## Reference results
 
-Measured on 2026-11-03, commit `de3be45`, load average about 2:
+### AMD Ryzen 5 5600, Linux
+
+Measured on 2026-11-03, on the commit after `d0e7bdd` that builds the backend
+with `-O3` (nanobind's `NOMINSIZE`) and computes the SH DFT products without BLAS,
+load average about 0.7:
+
+- AMD Ryzen 5 5600 (6 cores, 12 threads), 16 GB, Ubuntu 26.04.1 (Linux 7.0.0)
+- Python 3.14.4, numpy 2.5.4 (scipy-openblas 0.3.34), scipy 1.18.1, astropy 8.0.2
+- GCC 15.2.0; portable build (no `SPECULA_CPP_NATIVE`)
+- C++ backend with 12 threads
+
+`bench_objects.py`:
+
+| Object (whole step, median) | numpy ms | C++ ms | Speed-up |
+|---|---|---|---|
+| Pyramid (24 modulation steps) | 94.01 | 8.95 | 10.5x |
+| SH 20x20, NGS | 47.15 | 0.91 | 51.7x |
+| SH 20x20, LGS kernel | 93.19 | 1.80 | 51.7x |
+| PSF nd=8 | 39.74 | 2.65 | 15.0x |
+| PSF nd=4 | 5.29 | 0.64 | 8.3x |
+| Propagation, 4 layers x 4 sources | 23.14 | 1.51 | 15.3x |
+| Atmosphere evolution, 4 layers | 1.11 | 0.67 | 1.7x |
+| CCD 120x120 with noise | 0.75 | 0.75 | 1.0x |
+
+`bench_scao.py`:
+
+| Configuration | ms/step | Speed-up | Peak memory |
+|---|---|---|---|
+| numpy | 228.3 | 1.0x | 366 MB |
+| C++ backend | 22.1 | 10.3x | 263 MB |
+| C++ backend, `psf_dt` = 5 ms on the cameras | 17.1 | 13.4x | 265 MB |
+
+| Object (ms/step) | numpy | C++ | C++ psf_dt |
+|---|---|---|---|
+| pyramid | 94.31 | 10.36 | 10.21 |
+| sh | 47.70 | 0.88 | 0.86 |
+| psf_ngs | 42.19 | 4.10 | 1.16 |
+| prop | 23.30 | 1.65 | 1.63 |
+| psf_sci1 | 6.82 | 1.02 | 0.35 |
+| psf_sci2 | 5.62 | 0.86 | 0.29 |
+| psf_sci3 | 5.58 | 0.86 | 0.29 |
+| atmo | 1.17 | 0.78 | 0.75 |
+| sh_ccd | 0.72 | 0.74 | 0.74 |
+| pyr_ccd | 0.43 | 0.42 | 0.38 |
+
+With `SPECULA_CPP_NATIVE=ON` (`-march=native`, AVX2) the C++ backend takes
+18.3 ms/step: pyramid 7.8 ms, propagation 1.0 ms.
+
+### Apple M1, macOS
+
+Measured on 2026-11-03, commit `de3be45`, load average about 2. That build was
+still optimized for size (`-Os`, nanobind's default) and SH used BLAS for its DFT
+products: both were slower than with the current code, and these results should
+be measured again.
 
 - Apple M1 (4 performance + 4 efficiency cores), 8 GB, macOS 26.7.2
 - Python 3.14.7, numpy 2.5.4 (Apple Accelerate BLAS), scipy 1.18.1, astropy 8.0.2
@@ -143,3 +196,9 @@ Measured on 2026-11-03, commit `de3be45`, load average about 2:
   ones for a simulation.
 - On other machines, the speed-up depends mostly on the number of cores (the
   numpy path is mainly single threaded) and on the memory bandwidth.
+- With OpenBLAS (numpy on Linux and Windows), any BLAS call in the loop leaves
+  OpenBLAS threads spinning for a while, which takes the cores of the C++ thread
+  pool: before the SH DFT products were moved to C++, this made the C++ backend
+  more than twice as slow on the Ryzen. Objects that add BLAS calls to the loop
+  (e.g. a reconstructor) can be checked by comparing with `OPENBLAS_THREAD_TIMEOUT=4`
+  or `OPENBLAS_NUM_THREADS=1` in the environment.

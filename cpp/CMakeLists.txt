@@ -20,7 +20,9 @@ endif()
 find_package(nanobind CONFIG REQUIRED)
 find_package(Threads REQUIRED)
 
-nanobind_add_module(specula_cpp NB_STATIC src/module.cpp)
+# NOMINSIZE: nanobind would otherwise add -Os, which overrides -O3 and makes the
+# kernels several times slower (and, with -march=native, omits vzeroupper)
+nanobind_add_module(specula_cpp NB_STATIC NOMINSIZE src/module.cpp)
 target_link_libraries(specula_cpp PRIVATE Threads::Threads)
 # pocketfft (header only): the kernels run its 1D FFTs on their own threads
 target_include_directories(specula_cpp PRIVATE third_party/pocketfft)
