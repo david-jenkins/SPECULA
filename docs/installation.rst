@@ -179,8 +179,10 @@ C++ CPU backend
 When the ``specula_cpp`` module is installed, objects on the CPU (``target_device_idx=-1``)
 use it instead of NumPy/SciPy for their heaviest computations: interpolations, rebinning,
 electric fields, and the per-step work of the ``PSF``, ``ModulatedPyramid``,
-``AtmoPropagation`` and ``AtmoEvolution`` objects. Results are the same up to floating
-point rounding.
+``AtmoPropagation`` and ``AtmoEvolution`` objects, and the ``CCD`` photon and readout noise.
+Results are the same up to floating point rounding, except the noise: it has the same
+distributions as with NumPy, but not the same random numbers (with the same seeds, and with
+any number of threads).
 
 Two parameters reduce the time further, with small errors (measured in
 ``cpp/benchmarks/README.md``): the ``psf_dt`` parameter of ``PSF`` (an approximation of

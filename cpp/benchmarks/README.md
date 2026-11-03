@@ -92,9 +92,8 @@ single precision (`precision=1`), as in the default `specula` command line.
 
 ### AMD Ryzen 5 5600, Linux
 
-Measured on 2026-11-03, on the commit after `a264de6` (pyramid with the
-intermediate results in the layout of the FFT buffers, fused PSF kernel, faster
-interpolation and thread pool wake-up), load average about 1.5:
+Measured on 2026-11-03, on the commit after `a7b0531` (C++ CCD noise, see the notes
+below), load average about 1.2:
 
 - AMD Ryzen 5 5600 (6 cores, 12 threads), 16 GB, Ubuntu 26.04.1 (Linux 7.0.0)
 - Python 3.14.4, numpy 2.5.4 (scipy-openblas 0.3.34), scipy 1.18.1, astropy 8.0.2
@@ -105,38 +104,39 @@ interpolation and thread pool wake-up), load average about 1.5:
 
 | Object (whole step, median) | numpy ms | C++ ms | Speed-up |
 |---|---|---|---|
-| Pyramid (24 modulation steps) | 93.39 | 5.22 | 17.9x |
-| SH 20x20, NGS | 46.74 | 0.67 | 69.5x |
-| SH 20x20, LGS kernel | 92.80 | 1.78 | 52.0x |
-| PSF nd=8 | 41.25 | 1.10 | 37.4x |
-| PSF nd=4 | 5.29 | 0.40 | 13.1x |
-| Propagation, 4 layers x 4 sources | 23.14 | 0.56 | 41.3x |
-| Atmosphere evolution, 4 layers | 1.13 | 0.55 | 2.0x |
-| CCD 120x120 with noise | 0.75 | 0.99 | 0.8x |
+| Pyramid (24 modulation steps) | 94.28 | 5.35 | 17.6x |
+| SH 20x20, NGS | 47.33 | 0.72 | 65.3x |
+| SH 20x20, LGS kernel | 92.65 | 1.59 | 58.3x |
+| PSF nd=8 | 40.63 | 1.08 | 37.7x |
+| PSF nd=4 | 5.27 | 0.44 | 11.9x |
+| Propagation, 4 layers x 4 sources | 23.07 | 0.65 | 35.4x |
+| Atmosphere evolution, 4 layers | 1.12 | 0.62 | 1.8x |
+| CCD 120x120 with noise | 0.75 | 0.19 | 4.0x |
 
 `bench_scao.py`:
 
 | Configuration | ms/step | Speed-up | Peak memory |
 |---|---|---|---|
-| numpy | 227.3 | 1.0x | 366 MB |
-| C++ backend | 14.1 | 16.1x | 257 MB |
-| C++ backend, `psf_dt` = 5 ms on the cameras | 11.8 | 19.3x | 258 MB |
+| numpy | 228.2 | 1.0x | 367 MB |
+| C++ backend | 13.2 | 17.3x | 257 MB |
+| C++ backend, `psf_dt` = 5 ms on the cameras | 10.6 | 21.4x | 257 MB |
 
 | Object (ms/step) | numpy | C++ | C++ psf_dt |
 |---|---|---|---|
-| pyramid | 93.75 | 6.71 | 6.53 |
-| sh | 47.71 | 0.70 | 0.72 |
-| psf_ngs | 41.62 | 1.95 | 0.67 |
-| prop | 23.31 | 0.72 | 0.74 |
-| psf_sci1 | 6.85 | 0.60 | 0.27 |
-| psf_sci2 | 5.63 | 0.58 | 0.25 |
-| psf_sci3 | 5.59 | 0.58 | 0.25 |
-| atmo | 1.17 | 0.69 | 0.71 |
-| sh_ccd | 0.73 | 0.73 | 0.81 |
-| pyr_ccd | 0.44 | 0.42 | 0.42 |
+| pyramid | 94.28 | 6.60 | 6.35 |
+| sh | 47.61 | 0.70 | 0.71 |
+| psf_ngs | 41.95 | 1.96 | 0.65 |
+| prop | 23.31 | 0.69 | 0.72 |
+| psf_sci1 | 6.90 | 0.60 | 0.27 |
+| psf_sci2 | 5.68 | 0.59 | 0.25 |
+| psf_sci3 | 5.65 | 0.58 | 0.25 |
+| atmo | 1.16 | 0.69 | 0.69 |
+| sh_ccd | 0.74 | 0.17 | 0.18 |
+| pyr_ccd | 0.43 | 0.17 | 0.15 |
 
-With `SPECULA_CPP_NATIVE=ON` (`-march=native`, AVX2) the C++ backend takes
-12.7 ms/step: pyramid 5.5 ms (3.8 ms in `bench_objects.py`).
+With `SPECULA_CPP_NATIVE=ON` (`-march=native`, AVX2), measured before the C++ CCD
+noise, the C++ backend took 12.7 instead of 14.1 ms/step: pyramid 5.5 ms (3.8 ms in
+`bench_objects.py`).
 
 ### Apple M1, macOS
 
@@ -187,14 +187,14 @@ be measured again.
 ## Approximations
 
 Two parameters trade some accuracy for speed. Measured with `bench_approx.py` on the
-Ryzen above (commit after `a7b0531`), against the exact computation with the C++ backend:
+Ryzen above, against the exact computation with the C++ backend:
 
 | Approximation | Time | Error |
 |---|---|---|
 | `ModulatedPyramid` `mod_step: 20` instead of the default 24 (`mod_amp` = 3) | pyramid 4.86 -> 4.16 ms | signal 1.0% / 0.8% / 0.5% |
-| `PSF` `psf_dt: 0.002` (steps of 1 ms) | simulation 15.2 -> 12.9 ms/step | integrated PSF 0.24%, SR exact |
-| `PSF` `psf_dt: 0.005` | simulation 12.1 ms/step | integrated PSF 1.1-1.5%, SR exact |
-| `PSF` `psf_dt: 0.010` | simulation 11.7 ms/step | integrated PSF 2.3-2.6%, SR exact |
+| `PSF` `psf_dt: 0.002` (steps of 1 ms) | simulation 14.1 -> 11.7 ms/step | integrated PSF 0.24%, SR exact |
+| `PSF` `psf_dt: 0.005` | simulation 10.8 ms/step | integrated PSF 1.1-1.5%, SR exact |
+| `PSF` `psf_dt: 0.010` | simulation 10.4 ms/step | integrated PSF 2.3-2.6%, SR exact |
 
 - Pyramid: relative RMS change of the signal I(phase) - I(flat), for residual-like
   phases (Kolmogorov, piston and tip-tilt removed) of 50 / 150 / 300 nm RMS at 750 nm.
@@ -203,8 +203,10 @@ Ryzen above (commit after `a7b0531`), against the exact computation with the C++
   over 300 steps. This simulation is open loop (seeing-limited PSFs, SR below 2%):
   check the error in closed loop, where the PSF changes differently between steps.
 
-With both (`mod_step: 20` and `psf_dt: 0.005` on the four cameras), `bench_scao.py`'s
-simulation takes 10.9 ms/step instead of 14.1, 21 times faster than numpy.
+(`bench_approx.py` times the simulation without trace skipping, so its times are a bit
+longer than `bench_scao.py`'s.) With both (`mod_step: 20` and `psf_dt: 0.005` on the four
+cameras), `bench_scao.py`'s simulation takes 9.8 ms/step instead of 13.2, 23 times
+faster than numpy.
 
 Other approximations were tried and rejected (pyramid errors at 50 / 150 / 300 nm):
 
@@ -216,8 +218,8 @@ Other approximations were tried and rejected (pyramid errors at 50 / 150 / 300 n
 | `fov: 1.5` instead of 2 | 4.67 ms | 0.7% / 0.9% / 1.5% | the FFT size does not change |
 
 Without approximation, building the backend for the CPU of the machine
-(`pip install ./cpp -Ccmake.define.SPECULA_CPP_NATIVE=ON`) takes the simulation from
-14.1 to 12.7 ms/step on the Ryzen (AVX2), but the module may not run on other CPUs.
+(`pip install ./cpp -Ccmake.define.SPECULA_CPP_NATIVE=ON`) made the simulation about 10%
+faster on the Ryzen (AVX2), but the module may not run on other CPUs.
 
 ## Notes for comparing results
 
@@ -225,13 +227,15 @@ Without approximation, building the backend for the CPU of the machine
   average of about 9 (background indexing) gave 23.9 ms/step for the C++ backend
   and 220.4 ms/step for numpy: compare runs made in similar conditions, and repeat
   a run if in doubt.
-- The CCD is not accelerated: its time is the random number generation of numpy,
-  kept so that the noise is the same with both backends. In `bench_objects.py` it
-  runs right after the other objects, which use all the cores: on the Ryzen its
-  first few tens of milliseconds are up to 40% slower (0.99 instead of 0.75 ms),
-  an effect of the CPU state that is not seen in the simulation.
-- The C++ results are the same as the numpy ones up to floating point rounding
-  (`test/test_cpp_backend.py`), and do not depend on the number of threads. The
+- The CCD photon and readout noise are drawn by the C++ backend, multithreaded, with
+  the same distributions as numpy but not the same random numbers: the noisy pixels
+  differ from a numpy run with the same seeds (the other results are the same up to
+  rounding). They do not depend on the number of threads.
+- In `bench_objects.py`, the CCD runs right after the other objects, which use all
+  the cores: with numpy, on the Ryzen, its first few tens of milliseconds were up to
+  40% slower, an effect of the CPU state that is not seen in the simulation.
+- The C++ results are the same as the numpy ones up to floating point rounding, except
+  the CCD noise (`test/test_cpp_backend.py`), and do not depend on the number of threads. The
   `psf_dt` configuration is an approximation (see the `PSF` documentation).
 - The peak memory of `bench_objects.py` includes the setup of all the objects in
   one process, with temporary arrays; the `bench_scao.py` values are the meaningful

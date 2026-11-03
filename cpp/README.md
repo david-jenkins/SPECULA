@@ -5,8 +5,9 @@ Optional C++ CPU backend for [SPECULA](https://github.com/ArcetriAdaptiveOptics/
 When this package is installed, SPECULA objects running on the CPU
 (`target_device_idx=-1`) use multithreaded C++ kernels for interpolation,
 rebinning, electric field computation and the per-step work of the PSF,
-pyramid and Shack-Hartmann objects, instead of the numpy/scipy code.
-Results are the same up to floating point rounding.
+pyramid and Shack-Hartmann objects and the CCD noise, instead of the
+numpy/scipy code. Results are the same up to floating point rounding, except
+the CCD noise, which has the same distributions but not the same random numbers.
 
 `benchmarks/README.md` describes a benchmark of the backend against numpy, and how
 to repeat it.

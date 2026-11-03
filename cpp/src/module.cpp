@@ -26,6 +26,7 @@
 #endif
 
 #include "kernels.hpp"
+#include "noise.hpp"
 #include "psf.hpp"
 #include "pyramid.hpp"
 
@@ -230,6 +231,22 @@ double py_psf_fft(in_strided<T> amp, in_strided<T> phase, T k, bool shift, out_a
 }
 
 template <class T>
+void py_poisson_noise(out_array<T> pixels, std::uint64_t seed, std::uint64_t stream) {
+    T *pp = pixels.data();
+    idx n = count(pixels);
+    nb::gil_scoped_release release;
+    poisson_noise(pp, n, seed, stream);
+}
+
+template <class T>
+void py_gaussian_noise(out_array<T> pixels, double sigma, std::uint64_t seed, std::uint64_t stream) {
+    T *pp = pixels.data();
+    idx n = count(pixels);
+    nb::gil_scoped_release release;
+    gaussian_noise(pp, n, sigma, seed, stream);
+}
+
+template <class T>
 void py_divide_inplace(out_array<T> a, T d) {
     T *pa = a.data();
     idx n = count(a);
@@ -379,6 +396,9 @@ void bind_real(nb::module_ &m) {
     m.def("masked_extrapolation", &py_masked_extrapolation<T>, a("phase"), a("amp"),
           nb::arg("threshold"), a("edge_pixels"), a("ref_idx"), a("coeffs"), a("valid"), a("out"));
     m.def("psf_fft", &py_psf_fft<T>, a("amp"), a("phase"), nb::arg("k"), nb::arg("shift"), a("out"));
+    m.def("poisson_noise", &py_poisson_noise<T>, a("pixels"), nb::arg("seed"), nb::arg("stream"));
+    m.def("gaussian_noise", &py_gaussian_noise<T>, a("pixels"), nb::arg("sigma"), nb::arg("seed"),
+          nb::arg("stream"));
     m.def("divide_inplace", &py_divide_inplace<T>, a("a"), nb::arg("d"));
     m.def("accumulate_sum_sq", &py_accumulate_sum_sq<T>, a("value"), a("total"), a("total_sq"));
     m.def("pyr_modulation", &py_pyr_modulation<T>, a("ef"), a("tlt_f"), a("ttexp"), a("mask"), a("ffv"),

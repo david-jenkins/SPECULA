@@ -1,6 +1,8 @@
 import warnings
 
-from specula import fuse
+import numpy as np
+
+from specula import fuse, cpp_compatible
 from specula.base_processing_obj import BaseProcessingObj, InputDesc, OutputDesc
 from specula.connections import InputValue
 from specula.data_objects.pixels import Pixels
@@ -99,6 +101,10 @@ class CCD(BaseProcessingObj):
             Random seed for readout noise (default is 2).
         excess_seed : int [1], optional
             Random seed for excess noise (default is 3).
+            With the C++ CPU backend, the photon and readout noise are drawn by
+            multithreaded C++ code, with the same distributions as numpy but not
+            the same random numbers for a given seed (and the same numbers with any
+            number of threads). Seeds set to None use numpy.
         excess_delta : float [1], optional
             Excess noise factor (default is 1.0).
             The excess noise factor (st. dev.) is ENF = sqrt(1 + 1/excess_delta)
@@ -221,6 +227,9 @@ class CCD(BaseProcessingObj):
         self._photon_rng = self.xp.random.default_rng(self._photon_seed)
         self._readout_rng = self.xp.random.default_rng(self._readout_seed)
         self._excess_rng = self.xp.random.default_rng(self._excess_seed)
+        # C++ backend: photon and readout noise of frame n are drawn from the
+        # streams n of photon_seed and readout_seed (see _noise_cpp())
+        self._noise_frame = 0
 
         self.inputs['in_i'] = InputValue(type=Intensity)
         self.outputs['out_pixels'] = self._pixels
@@ -280,6 +289,17 @@ class CCD(BaseProcessingObj):
             self._output_integrated_i.generation_time = self.current_time
             self._integrated_i.i *= 0.0
 
+    def _noise_cpp(self, pixels):
+        '''
+        True if the photon and readout noise are drawn by the C++ backend:
+        multithreaded, with the same distributions as numpy but not the same
+        random numbers (and the same numbers with any number of threads).
+        Seeds left to None (random) use numpy.
+        '''
+        return self.cpp is not None and pixels.dtype in (np.float32, np.float64) and \
+            cpp_compatible(pixels.dtype, pixels) and \
+            self._photon_seed is not None and self._readout_seed is not None
+
     def apply_noise(self):
         pixels = self._pixels.pixels  # Name change, same reference
 
@@ -292,8 +312,12 @@ class CCD(BaseProcessingObj):
         if self._cic_noise:
             pixels += self.xp.random.binomial(1, self._cic_level, pixels.shape)
         
+        use_cpp = self._noise_cpp(pixels)
         if self._photon_noise:
-            pixels[:] = self._photon_rng.poisson(pixels)
+            if use_cpp:
+                self.cpp.poisson_noise(pixels, self._photon_seed % 2**64, self._noise_frame)
+            else:
+                pixels[:] = self._photon_rng.poisson(pixels)
 
         if self._excess_noise:
             ex_ccd_frame = self._excess_delta * pixels
@@ -301,8 +325,13 @@ class CCD(BaseProcessingObj):
             pixels[:] = 1.0 / self._excess_delta * self._excess_rng.gamma(shape=ex_ccd_frame, scale=self._emccd_gain)
 
         if self._readout_noise:
-            ron_vector = self._readout_rng.standard_normal(size=pixels.size)
-            pixels += (ron_vector.reshape(pixels.shape) * self._readout_level)
+            if use_cpp:
+                self.cpp.gaussian_noise(pixels, float(self._readout_level), self._readout_seed % 2**64,
+                                        self._noise_frame)
+            else:
+                ron_vector = self._readout_rng.standard_normal(size=pixels.size)
+                pixels += (ron_vector.reshape(pixels.shape) * self._readout_level)
+        self._noise_frame += 1
 
         if self._pixelGains is not None:
             pixels *= self._pixelGains

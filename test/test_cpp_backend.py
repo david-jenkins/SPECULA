@@ -19,7 +19,9 @@ from specula.lib.extrapolation_2d import EFInterpolator
 from specula.lib.interp2d import Interp2D
 from specula.lib.make_mask import make_mask
 from specula.lib.toccd import toccd
+from specula.data_objects.intensity import Intensity
 from specula.processing_objects.atmo_propagation import AtmoPropagation
+from specula.processing_objects.ccd import CCD
 from specula.processing_objects import modulated_pyramid
 from specula.processing_objects.modulated_pyramid import ModulatedPyramid
 from specula.processing_objects.psf import PSF
@@ -248,6 +250,72 @@ class TestCppBackend(unittest.TestCase):
             return [prop.outputs[f'out_{name}_ef'].field.copy() for name in sources]
         for r, n in zip(*numpy_and_cpp(f)):
             self.assert_close(n, r, 1e-6)
+
+    # CCD noise: same distributions as numpy, not the same random numbers
+
+    def test_poisson_noise(self):
+        import specula_cpp as cpp
+        n = 100_000
+        for lam in (0.3, 4.0, 10.0, 37.5, 1e4):  # both algorithms (multiplication, PTRS)
+            a = np.full(n, lam)
+            cpp.poisson_noise(a, 11, 0)
+            np.testing.assert_array_equal(a, np.round(a))
+            # Mean and variance within 5 standard errors
+            self.assertLess(abs(a.mean() - lam), 5 * np.sqrt(lam / n))
+            self.assertLess(abs(a.var() / lam - 1), 5 * np.sqrt(2 / n) + 5 / np.sqrt(lam * n))
+        zero = np.zeros(10, dtype=np.float32)
+        cpp.poisson_noise(zero, 1, 0)
+        np.testing.assert_array_equal(zero, 0)
+        with self.assertRaises(ValueError):
+            cpp.poisson_noise(np.array([1.0, -1.0]), 1, 0)
+
+    def test_gaussian_noise(self):
+        import specula_cpp as cpp
+        n = 100_000
+        g = np.full(n, 3.0)
+        cpp.gaussian_noise(g, 2.0, 5, 0)
+        self.assertLess(abs(g.mean() - 3.0), 5 * 2.0 / np.sqrt(n))
+        self.assertLess(abs(g.std() / 2.0 - 1), 5 * np.sqrt(0.5 / n))
+        # Fourth moment of a Gaussian: 3 sigma^4
+        self.assertLess(abs(np.mean((g - 3.0) ** 4) / 16 - 3), 0.1)
+
+    def test_noise_streams(self):
+        import specula_cpp as cpp
+        threads = cpp.get_num_threads()
+        draws = []
+        for n_threads, seed, stream in ((threads, 3, 4), (1, 3, 4), (threads, 3, 5), (threads, 4, 4)):
+            cpp.set_num_threads(n_threads)
+            a = np.full(5000, 50.0, dtype=np.float32)
+            cpp.poisson_noise(a, seed, stream)
+            draws.append(a)
+        cpp.set_num_threads(threads)
+        np.testing.assert_array_equal(draws[0], draws[1])  # any number of threads
+        for other in draws[2:]:  # another stream or seed
+            self.assertLess(abs(np.corrcoef(draws[0], other)[0, 1]), 0.1)
+
+    def test_ccd_noise(self):
+        def f():
+            ccd = CCD(SimulParams(time_step=1), size=(64, 64), dt=1, bandw=1, photon_noise=True,
+                      readout_noise=True, readout_level=3.0, target_device_idx=-1, precision=1)
+            i = Intensity(64, 64, target_device_idx=-1, precision=1)
+            i.i[:] = 200.0
+            ccd.inputs['in_i'].set(i)
+            frames = []
+            for t in range(1, 4):
+                i.generation_time = t * 1_000_000_000
+                ccd.check_ready(i.generation_time)
+                ccd.trigger()
+                ccd.post_trigger()
+                frames.append(ccd.outputs['out_pixels'].pixels.copy())
+            self.assertEqual(ccd._noise_cpp(ccd._pixels.pixels), specula.cpp is not None)
+            return np.array(frames)
+        ref, new = numpy_and_cpp(f)
+        # Photon (variance 200) and readout (3**2) noise: same statistics, other numbers
+        for frames in (ref, new):
+            self.assertLess(abs(frames.mean() - 200), 0.5)
+            self.assertLess(abs(frames.var() / 209 - 1), 0.05)
+        self.assertFalse(np.array_equal(ref, new))
+        self.assertFalse(np.array_equal(new[0], new[1]))  # each frame draws new noise
 
 
 if __name__ == '__main__':
