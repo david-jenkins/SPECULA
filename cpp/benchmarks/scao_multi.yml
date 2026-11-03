@@ -1,0 +1,130 @@
+---
+# Open-loop SCAO benchmark of cpp/benchmarks/bench_scao.py (see README.md):
+# 4 layers, an NGS with a pyramid and a 20x20 SH, 4 science cameras
+main:
+  class:             'SimulParams'
+  root_dir:          './calib'
+  pixel_pupil:       160
+  pixel_pitch:       0.05
+  total_time:        0.050
+  time_step:         0.001
+
+seeing:
+  class:             'WaveGenerator'
+  constant:          0.8
+
+wind_speed:
+  class:             'WaveGenerator'
+  constant:          [10., 15., 20., 25.]
+
+wind_direction:
+  class:             'WaveGenerator'
+  constant:          [0., 45., 90., 135.]
+
+ngs:
+  class:             'Source'
+  polar_coordinates: [0.0, 0.0]
+  magnitude:         8
+  wavelengthInNm:    750
+
+sci1: &SCI
+  class:             'Source'
+  polar_coordinates: [10.0, 0.0]
+  magnitude:         8
+  wavelengthInNm:    1650
+sci2: { <<: *SCI, polar_coordinates: [10.0, 120.0] }
+sci3: { <<: *SCI, polar_coordinates: [10.0, 240.0] }
+
+pupilstop:
+  class:             'Pupilstop'
+  simul_params_ref:  'main'
+  obs_diam:          0.1
+
+atmo:
+  class:             'AtmoEvolution'
+  simul_params_ref:  'main'
+  L0:                25
+  heights:           [0., 2000., 6000., 12000.]
+  Cn2:               [0.5, 0.2, 0.2, 0.1]
+  fov:               30.0
+  pixel_phasescreens: 1024
+  inputs:
+    seeing: 'seeing.output'
+    wind_speed: 'wind_speed.output'
+    wind_direction: 'wind_direction.output'
+  outputs: ['layer_list']
+
+prop:
+  class:             'AtmoPropagation'
+  simul_params_ref:  'main'
+  source_dict_ref:   ['ngs', 'sci1', 'sci2', 'sci3']
+  inputs:
+    atmo_layer_list: ['atmo.layer_list']
+    common_layer_list: ['pupilstop']
+  outputs: ['out_ngs_ef', 'out_sci1_ef', 'out_sci2_ef', 'out_sci3_ef']
+
+pyramid:
+  class:             'ModulatedPyramid'
+  simul_params_ref:  'main'
+  pup_diam:          30.
+  pup_dist:          36.
+  fov:               2.0
+  mod_amp:           3.0
+  output_resolution: 80
+  wavelengthInNm:    750
+  inputs:
+    in_ef: 'prop.out_ngs_ef'
+
+pyr_ccd:
+  class:             'CCD'
+  simul_params_ref:  'main'
+  size:              [80, 80]
+  dt:                0.001
+  bandw:             300
+  photon_noise:      True
+  readout_noise:     True
+  readout_level:     1.0
+  quantum_eff:       0.32
+  inputs:
+    in_i: 'pyramid.out_i'
+
+sh:
+  class:             'SH'
+  subap_wanted_fov:  1.2
+  sensor_pxscale:    0.15
+  subap_npx:         6
+  subap_on_diameter: 20
+  wavelengthInNm:    750
+  inputs:
+    in_ef: 'prop.out_ngs_ef'
+
+sh_ccd:
+  class:             'CCD'
+  simul_params_ref:  'main'
+  size:              [120, 120]
+  dt:                0.001
+  bandw:             300
+  photon_noise:      True
+  readout_noise:     True
+  readout_level:     1.0
+  quantum_eff:       0.32
+  inputs:
+    in_i: 'sh.out_i'
+
+psf_ngs:
+  class:             'PSF'
+  simul_params_ref:  'main'
+  wavelengthInNm:    1650
+  nd:                8
+  inputs:
+    in_ef: 'prop.out_ngs_ef'
+
+psf_sci1: &PSF
+  class:             'PSF'
+  simul_params_ref:  'main'
+  wavelengthInNm:    1250
+  nd:                4
+  inputs:
+    in_ef: 'prop.out_sci1_ef'
+psf_sci2: { <<: *PSF, wavelengthInNm: 1650, inputs: { in_ef: 'prop.out_sci2_ef' } }
+psf_sci3: { <<: *PSF, wavelengthInNm: 2200, inputs: { in_ef: 'prop.out_sci3_ef' } }
