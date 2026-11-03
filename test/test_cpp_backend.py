@@ -25,6 +25,7 @@ from specula.processing_objects.ccd import CCD
 from specula.processing_objects import modulated_pyramid
 from specula.processing_objects.modulated_pyramid import ModulatedPyramid
 from specula.processing_objects.psf import PSF
+from specula.processing_objects import sh
 from specula.processing_objects.sh import SH
 
 from test.specula_testlib import cpp_backend, cpp_available
@@ -218,9 +219,13 @@ class TestCppBackend(unittest.TestCase):
                            data_dir=data_dir, target_device_idx=-1, precision=1, **args)
                 shobj.inputs['in_ef'].set(ef)
                 run_steps(shobj, [ef], 2)
-            return shobj.outputs['out_i'].i.copy()
-        ref, new = numpy_and_cpp(f)
+            return shobj.outputs['out_i'].i.copy(), shobj._cpp_rows
+        (ref, ref_rows), (new, new_rows) = numpy_and_cpp(f)
+        # The C++ path is used only with the backend
+        self.assertIsNone(ref_rows)
+        self.assertIsNotNone(new_rows)
         self.assert_close(new, ref, 1e-5)
+        return new_rows
 
     def test_sh(self):
         self.run_sh()
@@ -233,6 +238,20 @@ class TestCppBackend(unittest.TestCase):
 
     def test_sh_lgs_kernel_rows(self):
         self.run_sh(laser_launch_tel=LaserLaunchTelescope(spot_size=1.0), subap_rows_slice=slice(2, 15))
+
+    def test_sh_lgs_kernel_refined(self):
+        # A narrow kernel refines the FFT grid (kernel_sampling_factor()), so N is much
+        # larger than 2n (192 vs 48 here)
+        self.run_sh(laser_launch_tel=LaserLaunchTelescope(spot_size=0.5), pupil=(120, 0.008333),
+                    subap_on_diameter=10, subap_npx=23, sensor_pxscale=0.928, subap_wanted_fov=9.28)
+
+    def test_sh_chunks(self):
+        # Several chunks of subaperture rows, the last one partial
+        with mock.patch.object(sh, '_CPP_CHUNK_BYTES', 1):
+            self.assertEqual(self.run_sh(subap_rows_slice=slice(3, 17)), 1)
+        # About 604 kB per row of 20 subapertures (n = 16): 3 rows per chunk, 20 rows
+        with mock.patch.object(sh, '_CPP_CHUNK_BYTES', 2_000_000):
+            self.assertEqual(self.run_sh(laser_launch_tel=LaserLaunchTelescope(spot_size=1.0)), 3)
 
     def test_atmo_propagation(self):
         def f():

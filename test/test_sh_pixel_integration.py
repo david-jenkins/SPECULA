@@ -12,7 +12,7 @@ from specula.data_objects.electric_field import ElectricField
 from specula.data_objects.laser_launch_telescope import LaserLaunchTelescope
 from specula.processing_objects.sh import SH
 from specula.lib.pixel_integration import pixel_integration_matrix, integrate_pixels
-from test.specula_testlib import cpu_and_gpu
+from test.specula_testlib import cpu_and_gpu, cpp_backend
 
 WAVELENGTH_NM = 500.0
 N_LENSES = 4
@@ -193,13 +193,15 @@ class TestSHPixelIntegration(unittest.TestCase):
     @cpu_and_gpu
     def test_negative_pixels_are_clipped(self, target_device_idx, xp):
         # Rounding in G @ PSF @ G.T can give slightly negative dark pixels: emulate
-        # them by removing the mean of each integrated row of subapertures
+        # them by removing the mean of each integrated row of subapertures.
+        # The C++ backend does not use integrate_pixels() (its results are compared
+        # with these in test_cpp_backend.py)
         def integrate_with_offset(*args, **kwargs):
             img = integrate_pixels(*args, **kwargs)
             return img - img.mean()
 
         with unittest.mock.patch('specula.processing_objects.sh.integrate_pixels',
-                                 integrate_with_offset):
+                                 integrate_with_offset), cpp_backend(False):
             sh, _ = self._make_sh(target_device_idx, self._phase_nm(), 4, 1.275, 5.1)
             img = self._run(sh)
         self.assertTrue(np.any(img == 0))

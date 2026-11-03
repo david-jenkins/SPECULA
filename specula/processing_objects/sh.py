@@ -2,8 +2,9 @@ import inspect
 import warnings
 
 import numpy as np
+import scipy.fft
 
-from specula import fuse, RAD2ASEC, cpuArray
+from specula import fuse, RAD2ASEC, cpuArray, cpp_compatible
 from specula.tracing import tracer
 from specula.lib.extrapolation_2d import EFInterpolator
 from specula.lib.pixel_integration import pixel_integration_matrix, integrate_pixels
@@ -21,6 +22,10 @@ from specula.data_objects.convolution_kernel import ConvolutionKernel
 # numpy 1.x compatibility (cupy sometimes tries to raise this exception)
 if hasattr(np, 'exceptions'):
     np.ComplexWarning = np.exceptions.ComplexWarning
+
+# Memory used by the C++ backend for the buffers of a chunk of subaperture rows
+# (see _setup_cpp()), small enough to stay in cache, as in modulated_pyramid
+_CPP_CHUNK_BYTES = 8 * 1024 * 1024
 
 @fuse(kernel_name='abs2')
 def abs2(u_fp, out, xp):
@@ -207,6 +212,8 @@ class SH(BaseProcessingObj):
         self._kernelobj = None
         self._last_sodium_values = None
         self._fov_ovs = 1
+        # Subaperture rows per chunk with the C++ backend (see _setup_cpp()), None without it
+        self._cpp_rows = None
 
         self._ccd_side = self._subap_npx * self._lenslet.n_lenses
         self._out_i = Intensity(self._ccd_side, self._ccd_side,
@@ -476,7 +483,13 @@ class SH(BaseProcessingObj):
         The CUDA graph is captured at the first trigger(), because the
         interpolation needs the pupil, and captured again if the interpolation
         parameters are changed with update_interpolator_parameters().
+
+        With the C++ backend, _trigger_code_cpp() is used instead.
         """
+        if self._cpp_rows is not None:
+            self._trigger_code_cpp()
+            return
+
         xp = self.xp
         dimx = self._lenslet.dimx
         rows = self.subap_rows_slice
@@ -583,8 +596,103 @@ class SH(BaseProcessingObj):
         for view in [self._wf3_view, self._subap_cube_view] + self._out_views:
             assert view.base is not None
 
+        # Derived classes with their own trigger_code() use the buffers above
+        if self.cpp is not None and type(self).trigger_code is SH.trigger_code and \
+                dimx * npx == self._ccd_side and \
+                cpp_compatible(self.complex_dtype, self.ef_row) and cpp_compatible(self.dtype, self._out_i.i):
+            self._setup_cpp()
+
         # The CUDA graph is captured at the first trigger(), see prepare_trigger()
         super().build_stream(allow_parallel=False, capture=False)
+
+    def _setup_cpp(self):
+        '''
+        Matrices and buffers of the C++ backend, see _trigger_code_cpp().
+
+        The spectrum of |FFT|^2 is the autocorrelation C of the subaperture field,
+        zero beyond the lags |l| < n. So the PSF on the N x N FFT grid (convolved
+        with the kernel, if any) is E Q E^T, with E[p, l] = exp(2 pi i p l / N) and
+        Q[l] = C[-l] (times N^2 K[l] with a kernel, as rfft2/irfft2 with
+        norm='forward' do), and the detector image G PSF G^T is L Q L^T with
+        the small matrix L = G E (subap_npx x 2n-1).
+        '''
+        n, fft_size, npx = self._ovs_np_sub, self._fft_size, self._subap_npx
+        dimx = self._lenslet.dimx
+        csize = np.dtype(self.complex_dtype).itemsize
+        rsize = np.dtype(self.dtype).itemsize
+
+        lags = 2 * n - 1
+        self._cpp_otf_size = m = scipy.fft.next_fast_len(lags)
+        lag = np.arange(-(n - 1), n)
+        e = np.exp(2j * np.pi * np.outer(np.arange(fft_size), lag) / fft_size)
+        g = cpuArray(self._pix_int_matrix if self._kernelobj is None else self._pix_int_matrix_kernel)
+        self._cpp_l = (g.astype(np.float64) @ e).astype(self.complex_dtype)
+        self._cpp_r = np.ascontiguousarray(self._cpp_l.T)
+        self._cpp_scale = self.dtype(1 if self._kernelobj is None else fft_size ** 2)
+
+        # Per subaperture: cube and autocorrelation (complex, m x m), |FFT|^2 (real, m x m),
+        # Q (complex, lags x lags), and without a kernel the unit kernel spectrum
+        subap_bytes = m * m * (2 * csize + rsize) + lags * lags * csize
+        if self._kernelobj is None:
+            subap_bytes += fft_size * (fft_size // 2 + 1) * csize
+        row_bytes = dimx * subap_bytes + n * dimx * n * csize
+        n_rows = self.subap_rows_slice.stop - self.subap_rows_slice.start
+        self._cpp_rows = min(n_rows, max(1, _CPP_CHUNK_BYTES // row_bytes))
+        b = self._cpp_rows * dimx
+
+        self._cpp_ef = np.empty((self._cpp_rows * n, dimx * n), dtype=self.complex_dtype)
+        self._cpp_cube = np.empty((b, m, m), dtype=self.complex_dtype)
+        self._cpp_psf = np.empty((b, m, m), dtype=self.dtype)
+        self._cpp_q = np.empty((b, lags, lags), dtype=self.complex_dtype)
+        self._cpp_tltf = np.ones((n, n), dtype=self.complex_dtype)
+        self._cpp_mask = np.ones((npx, npx), dtype=self.dtype)
+        if self._kernelobj is None:
+            self._cpp_kernels = np.ones((b, fft_size, fft_size // 2 + 1), dtype=self.complex_dtype)
+
+    def _trigger_code_cpp(self):
+        '''
+        trigger_code() with the C++ CPU backend: the same image, computed
+        _cpp_rows rows of subapertures at a time from the autocorrelation of
+        each subaperture field (see _setup_cpp()), with FFTs of size
+        next_fast_len(2n-1) instead of _fft_size:
+
+        1. the subapertures, zero padded (C++), and their |FFT|^2 (scipy.fft, C++);
+        2. the autocorrelation (inverse FFT), times the kernel spectrum at the
+           same lags (C++);
+        3. the detector pixels, Re(L Q L^T), written into the output image (C++).
+        '''
+        cpp = self.cpp
+        n, npx, dimx = self._ovs_np_sub, self._subap_npx, self._lenslet.dimx
+        workers = cpp.get_num_threads()
+        start, stop = self.subap_rows_slice.start, self.subap_rows_slice.stop
+
+        with tracer('interpolation', self):
+            self.ef_interpolator.interpolate()
+        wf1 = self.ef_interpolator.interpolated_ef()
+
+        for r0 in range(start, stop, self._cpp_rows):
+            r1 = min(r0 + self._cpp_rows, stop)
+            b = (r1 - r0) * dimx
+            ef = wf1.ef_at_lambda(self.wavelength_in_nm, slicey=np.s_[r0 * n: r1 * n],
+                                  slicex=np.s_[:], out=self._cpp_ef[:(r1 - r0) * n])
+            cube = self._cpp_cube[:b]
+            cpp.sh_subap_cube(ef, dimx, self._cpp_tltf, cube)
+            cube = scipy.fft.fft2(cube, workers=workers, overwrite_x=True)
+            cpp.abs2(cube, self._cpp_psf[:b])
+            autocorr = scipy.fft.ifft2(self._cpp_psf[:b], workers=workers)
+
+            if self._kernelobj is None:
+                kernels = self._cpp_kernels[:b]
+            else:
+                kernels = np.ascontiguousarray(self._kernelobj.kernels[r0 * dimx: r1 * dimx],
+                                               dtype=self.complex_dtype)
+            q = self._cpp_q[:b]
+            cpp.sh_otf_product(autocorr, kernels, self._fft_size, self._cpp_scale, q)
+
+            image = self._out_i.i[r0 * npx: r1 * npx]
+            cpp.sh_dft_image(q, dimx, self._cpp_l, self._cpp_r, False, self._cpp_mask, image)
+            # As in trigger_code(): rounding can make dark pixels slightly negative
+            np.maximum(image, 0, out=image)
 
     def update_interpolator_parameters(self, xShiftPhInPixel=None, yShiftPhInPixel=None,
                                        rotAnglePhInDeg=None, magnification=None):
