@@ -288,68 +288,6 @@ void accumulate_sum_sq(const T *v, T *sum, T *sum_sq, idx n) {
 }
 
 // ---------------------------------------------------------------------------
-// ModulatedPyramid, for a chunk of mc modulation steps
-
-// u[c, :s, :s] = ef * tlt_f * ttexp[c], zero elsewhere; u is (mc, t, t)
-template <class T>
-void pyr_modulate(const std::complex<T> *ef, const std::complex<T> *tlt_f,
-                  const std::complex<T> *ttexp, idx mc, idx s, idx t, std::complex<T> *u) {
-    parallel_for(mc * t, rows_grain(t), [&](idx r0, idx r1) {
-        for (idx r = r0; r < r1; ++r) {
-            idx c = r / t, y = r % t;
-            std::complex<T> *dst = u + r * t;
-            idx filled = 0;
-            if (y < s) {
-                const std::complex<T> *e = ef + y * s;
-                const std::complex<T> *f = tlt_f + y * s;
-                const std::complex<T> *m = ttexp + (c * s + y) * s;
-                for (idx x = 0; x < s; ++x)
-                    dst[x] = cmul(cmul(e[x], f[x]), m[x]);
-                filled = s;
-            }
-            std::fill(dst + filled, dst + t, std::complex<T>(0));
-        }
-    });
-}
-
-// Focal plane of each step c: fpsf += ffv[c] * |F[c]|^2, then F[c] *= mask
-template <class T>
-void pyr_focal(std::complex<T> *F, idx mc, idx n, const std::complex<T> *mask, const T *ffv,
-               T *fpsf) {
-    constexpr idx block = 2048;
-    parallel_for((n + block - 1) / block, 1, [&](idx b0, idx b1) {
-        for (idx b = b0; b < b1; ++b) {
-            idx p0 = b * block, p1 = std::min(n, p0 + block);
-            for (idx c = 0; c < mc; ++c) {
-                std::complex<T> *f = F + c * n;
-                for (idx p = p0; p < p1; ++p) {
-                    fpsf[p] += abs2(f[p]) * ffv[c];
-                    f[p] = cmul(f[p], mask[p]);
-                }
-            }
-        }
-    });
-}
-
-// Pupil plane of each step c: image += ffv[c] * |norm * P[c]|^2
-template <class T>
-void pyr_pupil(const std::complex<T> *P, idx mc, idx n, const T *ffv, T norm, T *image) {
-    constexpr idx block = 2048;
-    parallel_for((n + block - 1) / block, 1, [&](idx b0, idx b1) {
-        for (idx b = b0; b < b1; ++b) {
-            idx p0 = b * block, p1 = std::min(n, p0 + block);
-            for (idx c = 0; c < mc; ++c) {
-                const std::complex<T> *f = P + c * n;
-                for (idx p = p0; p < p1; ++p) {
-                    std::complex<T> v{f[p].real() * norm, f[p].imag() * norm};
-                    image[p] += abs2(v) * ffv[c];
-                }
-            }
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
 // SH
 
 // out[r, c] = |in[r, c]|^2 * mask[r % mr, c % mc]

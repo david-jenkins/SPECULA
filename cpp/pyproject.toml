@@ -9,6 +9,7 @@ description = "Optional C++ CPU backend for the SPECULA adaptive optics simulato
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE", "third_party/pocketfft/LICENSE.md"]
 authors = [
     { name = "INAF Arcetri Adaptive Optics group" }
 ]
