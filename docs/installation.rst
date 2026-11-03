@@ -180,7 +180,9 @@ When the ``specula_cpp`` module is installed, objects on the CPU (``target_devic
 use it instead of NumPy/SciPy for their heaviest computations: interpolations, rebinning,
 electric fields, and the per-step work of the ``PSF``, ``ModulatedPyramid``,
 ``AtmoPropagation`` and ``AtmoEvolution`` objects. Results are the same up to floating
-point rounding.
+point rounding. With many or large science
+cameras, the ``psf_dt`` parameter of ``PSF`` (an approximation of the long exposure, see its
+documentation) can reduce the cost further.
 
 It is built from the ``cpp`` directory of the source repository, and needs a C++17
 compiler (CMake, nanobind and scikit-build-core are installed automatically during the build):

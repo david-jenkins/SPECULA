@@ -204,14 +204,16 @@ class TestCppBackend(unittest.TestCase):
     def test_pyramid_alternating(self):
         self.run_pyramid(n_steps=3, mod_type='alternating')
 
-    def run_sh(self, laser_launch_tel=None, subap_rows_slice=None):
+    def run_sh(self, laser_launch_tel=None, subap_rows_slice=None, pupil=(160, 0.05), **kwargs):
+        args = dict(wavelengthInNm=750, subap_wanted_fov=1.2, sensor_pxscale=0.15,
+                    subap_on_diameter=20, subap_npx=6)
+        args.update(kwargs)
+
         def f():
-            ef = pupil_field(160, 0.05, 50, seed=9)
+            ef = pupil_field(*pupil, 50, seed=9)
             with tempfile.TemporaryDirectory() as data_dir:
-                shobj = SH(wavelengthInNm=750, subap_wanted_fov=1.2, sensor_pxscale=0.15,
-                           subap_on_diameter=20, subap_npx=6, laser_launch_tel=laser_launch_tel,
-                           subap_rows_slice=subap_rows_slice, data_dir=data_dir,
-                           target_device_idx=-1, precision=1)
+                shobj = SH(laser_launch_tel=laser_launch_tel, subap_rows_slice=subap_rows_slice,
+                           data_dir=data_dir, target_device_idx=-1, precision=1, **args)
                 shobj.inputs['in_ef'].set(ef)
                 run_steps(shobj, [ef], 2)
             return shobj.outputs['out_i'].i.copy()
@@ -226,6 +228,9 @@ class TestCppBackend(unittest.TestCase):
 
     def test_sh_lgs_kernel(self):
         self.run_sh(laser_launch_tel=LaserLaunchTelescope(spot_size=1.0))
+
+    def test_sh_lgs_kernel_rows(self):
+        self.run_sh(laser_launch_tel=LaserLaunchTelescope(spot_size=1.0), subap_rows_slice=slice(2, 15))
 
     def test_atmo_propagation(self):
         def f():

@@ -423,6 +423,57 @@ class TestPSF(unittest.TestCase):
         self.assertLess(max_std, 1e-10, "Std dev should be ~0 for identical frames")
 
     @cpu_and_gpu
+    def test_psf_dt(self, target_device_idx, xp):
+        """With psf_dt, the PSF is computed every psf_dt, and the SR at every step"""
+        simul_params, ef, wavelengthInNm = self.get_basic_setup(target_device_idx, pixel_pupil=50)
+
+        psf_all = PSF(simul_params=simul_params, wavelengthInNm=wavelengthInNm,
+                      nd=2.0, target_device_idx=target_device_idx)
+        psf_dec = PSF(simul_params=simul_params, wavelengthInNm=wavelengthInNm,
+                      nd=2.0, psf_dt=0.002, target_device_idx=target_device_idx)
+        for psf in (psf_all, psf_dec):
+            psf.inputs['in_ef'].set(ef)
+            psf.setup()
+
+        rng = np.random.default_rng(1)
+        computed = []
+        for step in range(1, 7):
+            t = psf_all.seconds_to_t(step * 0.001)
+            ef.phaseInNm[:] = xp.asarray(50.0 * rng.standard_normal(ef.phaseInNm.shape))
+            ef.generation_time = t
+            for psf in (psf_all, psf_dec):
+                psf.check_ready(t)
+                psf.trigger()
+                psf.post_trigger()
+
+            # The SR is exact at every step
+            np.testing.assert_allclose(float(psf_dec.sr.value), float(psf_all.sr.value), rtol=1e-5)
+
+            # The PSF is computed at the first step, then every 2 ms
+            if step % 2 == 1:
+                computed.append(cpuArray(psf_all.psf.value.copy()))
+                self.assertEqual(psf_dec.psf.generation_time, t)
+                np.testing.assert_allclose(cpuArray(psf_dec.psf.value), computed[-1], rtol=1e-6,
+                                           atol=1e-7 * computed[-1].max())
+            else:
+                self.assertEqual(psf_dec.psf.generation_time, t - psf_all.seconds_to_t(0.001))
+
+        for psf in (psf_all, psf_dec):
+            psf.finalize()
+
+        self.assertEqual(psf_dec.count, 6)
+        self.assertEqual(psf_dec._psf_count, 3)
+        np.testing.assert_allclose(float(psf_dec.int_sr.value), float(psf_all.int_sr.value), rtol=1e-5)
+        mean_psf = np.mean(computed, axis=0)
+        np.testing.assert_allclose(cpuArray(psf_dec.int_psf.value), mean_psf, rtol=1e-5,
+                                   atol=1e-7 * mean_psf.max())
+
+    def test_psf_dt_must_be_positive(self):
+        simul_params, _, wavelengthInNm = self.get_basic_setup(target_device_idx=-1)
+        with self.assertRaises(ValueError):
+            PSF(simul_params=simul_params, wavelengthInNm=wavelengthInNm, psf_dt=0)
+
+    @cpu_and_gpu
     def test_coronagraph_std_dev_calculation(self, target_device_idx, xp):
         """Test coronagraph PSF standard deviation calculation"""
         simul_params, ef, wavelengthInNm = self.get_basic_setup(target_device_idx, pixel_pupil=50)

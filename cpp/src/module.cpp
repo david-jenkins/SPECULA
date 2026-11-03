@@ -329,6 +329,22 @@ void py_sh_subap_cube(in_array<cplx<T>> ef, idx dimx, in_array<cplx<T>> tltf, ou
 }
 
 template <class T>
+void py_sh_otf_product(in_array<cplx<T>> A, in_array<cplx<T>> Kh, idx N, T scale, out_array<cplx<T>> Q) {
+    require(A.ndim() == 3 && dim(A, 1) == dim(A, 2), "A must have shape (B, M, M)");
+    idx B = dim(A, 0), M = dim(A, 1);
+    require(N > 0, "N must be > 0");
+    require_shape(Kh, {B, N, N / 2 + 1}, "Kh");
+    require(Q.ndim() == 3 && dim(Q, 0) == B && dim(Q, 1) == dim(Q, 2) && dim(Q, 1) % 2 == 1,
+            "Q must have shape (B, 2L+1, 2L+1)");
+    idx L = (dim(Q, 1) - 1) / 2;
+    require(2 * L + 1 <= M && L < N / 2, "the lags must fit in both FFT grids without aliasing");
+    const cplx<T> *pa = A.data(), *pk = Kh.data();
+    cplx<T> *pq = Q.data();
+    nb::gil_scoped_release release;
+    sh_otf_product(pa, B, M, pk, N, N / 2 + 1, L, scale, pq);
+}
+
+template <class T>
 void py_sh_cut_into_image(in_array<T> psf, idx dimx, idx c0, in_array<T> mask, out_array<T> image) {
     require(dimx > 0 && psf.ndim() == 3 && dim(psf, 1) == dim(psf, 2) && dim(psf, 0) % dimx == 0,
             "psf must have shape (rows * dimx, fft, fft)");
@@ -364,6 +380,8 @@ void bind_real(nb::module_ &m) {
     m.def("abs2_tiled_mask", &py_abs2_tiled_mask<T>, a("input"), a("mask"), a("out"));
     m.def("abs2", &py_abs2<T>, a("input"), a("out"));
     m.def("sh_subap_cube", &py_sh_subap_cube<T>, a("ef"), nb::arg("dimx"), a("tltf"), a("out"));
+    m.def("sh_otf_product", &py_sh_otf_product<T>, a("A"), a("Kh"), nb::arg("N"), nb::arg("scale"),
+          a("Q"));
     m.def("sh_cut_into_image", &py_sh_cut_into_image<T>, a("psf"), nb::arg("dimx"), nb::arg("c0"),
           a("mask"), a("image"));
 }

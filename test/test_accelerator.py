@@ -401,9 +401,11 @@ class TestAcceleratorOnCpu(unittest.TestCase):
         from specula.processing_objects.psf_coronagraph import PsfCoronagraph
         from specula.processing_objects.pyr_slopec import PyrSlopec
         for klass in (WaveGenerator, IirFilter, BaseSlicer, LinearCombination, PyrSlopec, Modalrec,
-                      ModalAnalysis, PSF, PsfCoronagraph):
+                      ModalAnalysis, PsfCoronagraph):
             self.assertIs(klass.can_accelerate(None), True, klass)
         # Classes that can be accelerated only in some cases
+        self.assertIs(PSF.can_accelerate(SimpleNamespace(psf_dt=None)), True)
+        self.assertIn('psf_dt', PSF.can_accelerate(SimpleNamespace(psf_dt=5_000_000)))
         self.assertIs(DM.can_accelerate(SimpleNamespace(max_force=None)), True)
         self.assertIn('force', DM.can_accelerate(SimpleNamespace(max_force=1.0)))
         ccd = dict(dt=1, loop_dt=1, current_time=5, start_time=0, _photon_noise=False,
