@@ -48,10 +48,11 @@ struct Bilinear {
     idx i00, i01, i10, i11;
     T xd, yd;
 
-    // Same indexing as the Interp2D CUDA kernel
+    // Same indexing as the Interp2D CUDA kernel. The coordinates are >= 0 (Interp2D
+    // clamps them), so truncation is floor, and much faster without SSE4.1.
     Bilinear(idx in_dx, idx in_dy, T x, T y) {
-        idx xi = static_cast<idx>(std::floor(x));
-        idx yi = static_cast<idx>(std::floor(y));
+        idx xi = static_cast<idx>(x);
+        idx yi = static_cast<idx>(y);
         idx xi2 = std::min(xi + 1, in_dx - 1);
         idx yi2 = std::min(yi + 1, in_dy - 1);
         xd = x - static_cast<T>(xi);
@@ -68,9 +69,12 @@ struct Bilinear {
     }
 };
 
+// A point costs about as much as 8 elements of the simple kernels
+constexpr idx kInterpGrain = kGrain / 8;
+
 template <class T>
 void interp2d(const T *in, idx in_dy, idx in_dx, const T *xx, const T *yy, T *out, idx n_out) {
-    parallel_for(n_out, kGrain, [&](idx b, idx e) {
+    parallel_for(n_out, kInterpGrain, [&](idx b, idx e) {
         for (idx i = b; i < e; ++i)
             out[i] = Bilinear<T>(in_dx, in_dy, xx[i], yy[i])(in);
     });
@@ -80,7 +84,7 @@ void interp2d(const T *in, idx in_dy, idx in_dx, const T *xx, const T *yy, T *ou
 template <class T>
 void interp2d_accumulate(const T *amp, const T *phase, idx in_dy, idx in_dx, const T *xx,
                          const T *yy, T *amp_out, T *phase_out, idx n_out) {
-    parallel_for(n_out, kGrain, [&](idx b, idx e) {
+    parallel_for(n_out, kInterpGrain, [&](idx b, idx e) {
         for (idx i = b; i < e; ++i) {
             Bilinear<T> w(in_dx, in_dy, xx[i], yy[i]);
             amp_out[i] *= w(amp);
@@ -107,8 +111,9 @@ void affine_bilinear(const T *data, idx ny, idx nx, const double *m, T *out, idx
                     o[i1] = 0;
                     continue;
                 }
-                double fy = std::floor(y), fx = std::floor(x);
-                idx y0 = static_cast<idx>(fy), x0 = static_cast<idx>(fx);
+                // y, x >= 0 here: truncation is floor, without a libm call
+                idx y0 = static_cast<idx>(y), x0 = static_cast<idx>(x);
+                double fy = static_cast<double>(y0), fx = static_cast<double>(x0);
                 idx y1 = std::min(y0 + 1, ny - 1), x1 = std::min(x0 + 1, nx - 1);
                 T wy = static_cast<T>(y - fy), wx = static_cast<T>(x - fx);
                 const T *ra = data + y0 * nx;
@@ -240,33 +245,7 @@ void masked_extrapolation(const T *phase, const T *amp, idx n, T threshold,
 }
 
 // ---------------------------------------------------------------------------
-// PSF: |FFT|^2 with optional fftshift; returns the total
-
-template <class T>
-double abs2_shift(const std::complex<T> *in, idx ny, idx nx, bool shift, T *out) {
-    std::vector<double> row_total(ny);
-    parallel_for(ny, rows_grain(nx), [&](idx r0, idx r1) {
-        for (idx y = r0; y < r1; ++y) {
-            const std::complex<T> *src = in + y * nx;
-            idx ys = shift ? (y + ny / 2) % ny : y;
-            T *dst = out + ys * nx;
-            idx xs = shift ? nx / 2 : 0;
-            double s = 0;
-            for (idx x = 0; x < nx - xs; ++x) {
-                T v = abs2(src[x]);
-                dst[x + xs] = v;
-                s += v;
-            }
-            for (idx x = nx - xs; x < nx; ++x) {
-                T v = abs2(src[x]);
-                dst[x + xs - nx] = v;
-                s += v;
-            }
-            row_total[y] = s;
-        }
-    });
-    return std::accumulate(row_total.begin(), row_total.end(), 0.0);
-}
+// PSF (the FFT is in psf.hpp)
 
 template <class T>
 void divide_inplace(T *a, idx n, T d) {

@@ -54,7 +54,16 @@ public:
             next_.store(0);
             ++generation_;
         }
-        cv_.notify_all();
+        // Wake only the workers needed (with the calling thread): waking all of
+        // them for a small job costs more than the job. A worker that is not
+        // woken joins the next job it is woken for, or that is posted while it
+        // is still busy (the wait predicate is checked first).
+        std::size_t wake = static_cast<std::size_t>(n_tasks - 1);
+        if (wake >= workers_.size())
+            cv_.notify_all();
+        else
+            for (std::size_t i = 0; i < wake; ++i)
+                cv_.notify_one();
         in_task() = true;
         work(&task, n_tasks);
         in_task() = false;

@@ -26,6 +26,7 @@
 #endif
 
 #include "kernels.hpp"
+#include "psf.hpp"
 #include "pyramid.hpp"
 
 namespace nb = nanobind;
@@ -213,14 +214,19 @@ void py_masked_extrapolation(in_array<T> phase, in_array<T> amp, T threshold,
 }
 
 template <class T>
-double py_abs2_shift(in_array<cplx<T>> in, bool shift, out_array<T> out) {
-    require(in.ndim() == 2, "input must be 2D");
-    require_shape(out, {dim(in, 0), dim(in, 1)}, "out");
-    const cplx<T> *pi = in.data();
+double py_psf_fft(in_strided<T> amp, in_strided<T> phase, T k, bool shift, out_array<T> out) {
+    require(amp.ndim() == 2, "amp must be 2D");
+    require_shape(phase, {dim(amp, 0), dim(amp, 1)}, "phase");
+    require(out.ndim() == 2 && dim(out, 0) >= dim(amp, 0) && dim(out, 1) >= dim(amp, 1),
+            "out must be 2D and at least as large as the field");
+    require(dim(amp, 0) > 0 && dim(amp, 1) > 0, "the field must not be empty");
+    const T *pa = amp.data(), *pp = phase.data();
     T *po = out.data();
-    idx ny = dim(in, 0), nx = dim(in, 1);
+    idx as0 = amp.stride(0), as1 = amp.stride(1);
+    idx ps0 = phase.stride(0), ps1 = phase.stride(1);
+    idx ny = dim(amp, 0), nx = dim(amp, 1), H = dim(out, 0), W = dim(out, 1);
     nb::gil_scoped_release release;
-    return abs2_shift(pi, ny, nx, shift, po);
+    return psf_fft(pa, as0, as1, pp, ps0, ps1, ny, nx, k, H, W, shift, po);
 }
 
 template <class T>
@@ -244,7 +250,7 @@ void py_accumulate_sum_sq(in_array<T> v, out_array<T> sum, out_array<T> sum_sq) 
 template <class T>
 void py_pyr_modulation(in_array<cplx<T>> ef, in_array<cplx<T>> tlt_f, in_array<cplx<T>> ttexp,
                        in_array<cplx<T>> mask, in_array<T> ffv, T norm, in_array<std::int64_t> stop_rows,
-                       out_array<cplx<T>> chunk, out_array<T> fpsf, out_array<T> image) {
+                       idx nc, out_array<T> fpsf, out_array<T> image) {
     require(ef.ndim() == 2 && dim(ef, 0) == dim(ef, 1), "ef must be square");
     idx s = dim(ef, 0);
     require_shape(tlt_f, {s, s}, "tlt_f");
@@ -254,8 +260,7 @@ void py_pyr_modulation(in_array<cplx<T>> ef, in_array<cplx<T>> tlt_f, in_array<c
     require(mask.ndim() == 2 && dim(mask, 0) == dim(mask, 1) && dim(mask, 0) >= s,
             "mask must have shape (t, t), t >= s");
     idx t = dim(mask, 0);
-    require(chunk.ndim() == 3 && dim(chunk, 0) > 0 && dim(chunk, 1) == t && dim(chunk, 2) == t,
-            "chunk must have shape (nc, t, t)");
+    require(nc > 0, "nc must be > 0");
     require_shape(fpsf, {t, t}, "fpsf");
     require_shape(image, {t, t}, "image");
     require(stop_rows.ndim() == 2 && dim(stop_rows, 1) == 2, "stop_rows must have shape (n, 2)");
@@ -265,11 +270,10 @@ void py_pyr_modulation(in_array<cplx<T>> ef, in_array<cplx<T>> tlt_f, in_array<c
                 "stop_rows ranges must be within [0, t)");
     const cplx<T> *pe = ef.data(), *pf = tlt_f.data(), *pt = ttexp.data(), *pm = mask.data();
     const T *pw = ffv.data();
-    cplx<T> *pc = chunk.data();
     T *pp = fpsf.data(), *pi = image.data();
-    idx n_ranges = dim(stop_rows, 0), nc = dim(chunk, 0);
+    idx n_ranges = dim(stop_rows, 0);
     nb::gil_scoped_release release;
-    pyr_modulation(pe, pf, pt, m, s, pm, pw, norm, pr, n_ranges, pc, nc, t, pp, pi);
+    pyr_modulation(pe, pf, pt, m, s, pm, pw, norm, pr, n_ranges, nc, t, pp, pi);
 }
 
 // x: the field of rows of q x q subapertures, shape (rows * q, dimx * q), or a cube
@@ -374,11 +378,11 @@ void bind_real(nb::module_ &m) {
     m.def("ef_at_lambda", &py_ef_at_lambda<T>, a("amp"), a("phase"), nb::arg("k"), a("out"));
     m.def("masked_extrapolation", &py_masked_extrapolation<T>, a("phase"), a("amp"),
           nb::arg("threshold"), a("edge_pixels"), a("ref_idx"), a("coeffs"), a("valid"), a("out"));
-    m.def("abs2_shift", &py_abs2_shift<T>, a("input"), nb::arg("shift"), a("out"));
+    m.def("psf_fft", &py_psf_fft<T>, a("amp"), a("phase"), nb::arg("k"), nb::arg("shift"), a("out"));
     m.def("divide_inplace", &py_divide_inplace<T>, a("a"), nb::arg("d"));
     m.def("accumulate_sum_sq", &py_accumulate_sum_sq<T>, a("value"), a("total"), a("total_sq"));
     m.def("pyr_modulation", &py_pyr_modulation<T>, a("ef"), a("tlt_f"), a("ttexp"), a("mask"), a("ffv"),
-          nb::arg("norm"), a("stop_rows"), a("chunk"), a("fpsf"), a("image"));
+          nb::arg("norm"), a("stop_rows"), nb::arg("nc"), a("fpsf"), a("image"));
     m.def("abs2", &py_abs2<T>, a("input"), a("out"));
     m.def("sh_subap_cube", &py_sh_subap_cube<T>, a("ef"), nb::arg("dimx"), a("tltf"), a("out"));
     m.def("sh_otf_product", &py_sh_otf_product<T>, a("A"), a("Kh"), nb::arg("N"), nb::arg("scale"),

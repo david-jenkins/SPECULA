@@ -187,7 +187,7 @@ class TestCppBackend(unittest.TestCase):
                                    target_device_idx=-1, precision=1, **kwargs)
             pyr.inputs['in_ef'].set(ef)
             run_steps(pyr, [ef], n_steps)
-            self.assertEqual(pyr._cpp_chunk is not None, specula.cpp is not None)
+            self.assertEqual(pyr._cpp_nc is not None, specula.cpp is not None)
             return (pyr.outputs['out_i'].i, pyr.outputs['out_psf_tot'].value,
                     pyr.outputs['out_psf_bfm'].value, pyr.outputs['out_transmission'].value)
         for r, n in zip(*numpy_and_cpp(f)):

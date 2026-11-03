@@ -30,9 +30,10 @@ def pyr1_abs2(v, norm, ffv, xp):
     return xp.real(v_norm * xp.conj(v_norm)) * ffv
 
 
-# Memory used by the C++ backend for the fields of a chunk of modulation steps.
-# Small enough for a chunk to stay in cache between the FFT passes.
-_CPP_CHUNK_BYTES = 16 * 1024 * 1024
+# Memory used by the C++ backend for the fields of a chunk of modulation steps
+# (fft_totsize**2 complex values per step). Small enough for a chunk to stay in
+# cache between the FFT passes: 4 steps of 480 x 480 were the fastest on a Ryzen 5 5600.
+_CPP_CHUNK_BYTES = 8 * 1024 * 1024
 
 
 class ModulatedPyramid(BaseProcessingObj):
@@ -315,7 +316,7 @@ class ModulatedPyramid(BaseProcessingObj):
         self.ttexp_shape = None
         self.u_tlt = None
         # Modulated fields of a chunk of modulation steps, with the C++ backend (see setup())
-        self._cpp_chunk = None
+        self._cpp_nc = None
         self.roll_array = [self.fft_padding//2, self.fft_padding//2]
         self.roll_axis = [0,1]
         self.ifft_norm = 1.0 / (self.fft_totsize * self.fft_totsize)
@@ -657,7 +658,7 @@ class ModulatedPyramid(BaseProcessingObj):
         self.pyr_image *=0
         self.fpsf *=0
 
-        if self._cpp_chunk is not None:
+        if self._cpp_nc is not None:
             self._modulation_cpp(ttexp_current)
         else:
             # Input electric field with a sub-pixel shift
@@ -703,14 +704,14 @@ class ModulatedPyramid(BaseProcessingObj):
         in trigger_code(), a chunk of steps at a time, in a single C++ call.
 
         The 2D FFTs are done one axis at a time (pocketfft, multithreaded), fused
-        with the operations between them, and skipping the rows known to be zero:
-        the zero padding below the input field in the forward FFT, and the rows
-        outside the field stop in the inverse FFT. Each pixel of fpsf and
+        with the operations between them, and skipping the FFTs known to give zero:
+        the columns of the zero padding in the forward FFT, and the rows outside
+        the field stop in the inverse FFT. Each pixel of fpsf and
         pyr_image is accumulated over the steps in order, as in trigger_code().
         '''
         self.cpp.pyr_modulation(self.ef, self.tlt_f, ttexp, self.shifted_masked_exp,
                                 self.flux_factor_vector, self.dtype(self.ifft_norm),
-                                self._cpp_stop_rows, self._cpp_chunk, self.fpsf, self.pyr_image)
+                                self._cpp_stop_rows, self._cpp_nc, self.fpsf, self.pyr_image)
 
     def _pupils_to_ccd(self):
         '''
@@ -774,9 +775,8 @@ class ModulatedPyramid(BaseProcessingObj):
             if cpp_compatible(self.complex_dtype, self.ef, self.tlt_f, self.ttexp, self.shifted_masked_exp) and \
                     cpp_compatible(self.dtype, self.flux_factor_vector, self.pyr_image, self.fpsf):
                 step_bytes = self.fft_totsize ** 2 * np.dtype(self.complex_dtype).itemsize
-                n_chunk = min(self.mod_steps, max(1, _CPP_CHUNK_BYTES // step_bytes))
-                self._cpp_chunk = np.empty((n_chunk, self.fft_totsize, self.fft_totsize),
-                                           dtype=self.complex_dtype)
+                # Steps computed together (the C++ kernel keeps their buffers)
+                self._cpp_nc = min(self.mod_steps, max(1, _CPP_CHUNK_BYTES // step_bytes))
                 # Ranges of focal plane rows with some pixel inside the field stop:
                 # the other rows are zero after the mask is applied
                 rows = np.flatnonzero(np.any(self.shifted_masked_exp != 0, axis=1))

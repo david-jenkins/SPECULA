@@ -1,6 +1,5 @@
 from specula.log import get_specula_logger
 import numpy as np
-import scipy.fft
 from collections import namedtuple
 
 import specula
@@ -15,23 +14,16 @@ def psf_abs2(v, xp):
 PsfGeometry = namedtuple('PsfGeometry', 'pixel_size_mas nd')
 
 
-def _calc_psf_cpp(phase, amp, complex_dtype, float_dtype, imwidth, normalize, nocenter,
-                  return_total):
+def _calc_psf_cpp(phase, amp, float_dtype, imwidth, normalize, nocenter, return_total):
     '''
-    calc_psf() with the C++ CPU backend. The FFT skips the zero padding: its
-    first pass only transforms the rows of the field. Both passes are multithreaded.
+    calc_psf() with the C++ CPU backend: a single kernel computes the field, its
+    FFT and |.|^2 (with the shift), skipping the zero padding in the row FFTs
+    and never storing the zero-padded field.
     '''
     cpp = specula.cpp
-    workers = cpp.get_num_threads()
-    u_ef = np.empty(phase.shape, dtype=complex_dtype)
-    cpp.ef_at_lambda(amp, phase, float_dtype.type(1), u_ef)
-    if imwidth is None:
-        u_fp = scipy.fft.fft2(u_ef, workers=workers, overwrite_x=True)
-    else:
-        u_fp = scipy.fft.fft(u_ef, n=imwidth, axis=1, workers=workers, overwrite_x=True)
-        u_fp = scipy.fft.fft(u_fp, n=imwidth, axis=0, workers=workers, overwrite_x=True)
-    psf = np.empty(u_fp.shape, dtype=float_dtype)
-    total_psf = float_dtype.type(cpp.abs2_shift(u_fp, not nocenter, psf))
+    shape = phase.shape if imwidth is None else (imwidth, imwidth)
+    psf = np.empty(shape, dtype=float_dtype)
+    total_psf = float_dtype.type(cpp.psf_fft(amp, phase, float_dtype.type(1), not nocenter, psf))
     if normalize:
         cpp.divide_inplace(psf, total_psf)
 
@@ -75,8 +67,8 @@ def calc_psf(phase, amp, xp=np, complex_dtype=np.complex64, imwidth=None, normal
         float_dtype = np.finfo(complex_dtype).dtype
         if cpp_compatible(float_dtype, phase, amp) and phase.ndim == 2 and \
                 (imwidth is None or imwidth >= max(phase.shape)):
-            return _calc_psf_cpp(phase, amp, complex_dtype, float_dtype, imwidth,
-                                 normalize, nocenter, return_total)
+            return _calc_psf_cpp(phase, amp, float_dtype, imwidth, normalize, nocenter,
+                                 return_total)
 
     # Set up the complex array based on input dimensions and data type
     if imwidth is not None:

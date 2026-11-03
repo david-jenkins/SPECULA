@@ -11,7 +11,7 @@ Results are the same up to floating point rounding.
 `benchmarks/README.md` describes a benchmark of the backend against numpy, and how
 to repeat it.
 
-The pyramid uses the FFTs of [pocketfft](https://github.com/mreineck/pocketfft)
+The pyramid and the PSF use the FFTs of [pocketfft](https://github.com/mreineck/pocketfft)
 (BSD 3-clause license), included unchanged in `third_party/pocketfft`.
 
 ## Installation
