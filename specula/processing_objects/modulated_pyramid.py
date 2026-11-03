@@ -60,7 +60,10 @@ class ModulatedPyramid(BaseProcessingObj):
         Modulation amplitude in lambda/D units (default: 3.0)
     mod_step : int [1], optional
         Number of modulation steps. If None, automatically calculated based on
-        mod_amp and mod_type (default: None)
+        mod_amp and mod_type (default: None): for circular modulation, a multiple
+        of 4 above 2*pi*mod_amp with some margin (24 for mod_amp = 3). It must be at
+        least 2*pi*mod_amp; the time is proportional to it, and with mod_amp = 3,
+        20 steps changed the signal by about 1% (cpp/benchmarks/README.md).
     mod_type : str
         Modulation type: 'circular', 'vertical', 'horizontal', or 'alternating'
         (default: 'circular')

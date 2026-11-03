@@ -13,6 +13,9 @@ Each backend or configuration runs in its own Python process, so that its memory
 and caches do not affect the others. Both scripts print comparison tables. The
 reference results below were measured with them.
 
+A third script, `bench_approx.py`, measures the error of the approximations that
+reduce the time further (see [Approximations](#approximations)).
+
 ## What is measured
 
 ### `bench_objects.py`
@@ -79,6 +82,7 @@ approximates the long-exposure PSF; the Strehl ratios are still exact at every s
    ```
 
    Each takes about one minute and uses less than 0.5 GB of memory.
+   `cpp/benchmarks/bench_approx.py` (about 30 s) measures the approximations.
 
 The number of threads of the C++ backend defaults to the CPUs available to the
 process; set `SPECULA_CPP_THREADS` to change it. All the computations are in
@@ -179,6 +183,41 @@ be measured again.
 | atmo | 1.92 | 0.54 | 0.53 |
 | sh_ccd | 0.83 | 0.83 | 0.84 |
 | pyr_ccd | 0.43 | 0.42 | 0.39 |
+
+## Approximations
+
+Two parameters trade some accuracy for speed. Measured with `bench_approx.py` on the
+Ryzen above (commit after `a7b0531`), against the exact computation with the C++ backend:
+
+| Approximation | Time | Error |
+|---|---|---|
+| `ModulatedPyramid` `mod_step: 20` instead of the default 24 (`mod_amp` = 3) | pyramid 4.86 -> 4.16 ms | signal 1.0% / 0.8% / 0.5% |
+| `PSF` `psf_dt: 0.002` (steps of 1 ms) | simulation 15.2 -> 12.9 ms/step | integrated PSF 0.24%, SR exact |
+| `PSF` `psf_dt: 0.005` | simulation 12.1 ms/step | integrated PSF 1.1-1.5%, SR exact |
+| `PSF` `psf_dt: 0.010` | simulation 11.7 ms/step | integrated PSF 2.3-2.6%, SR exact |
+
+- Pyramid: relative RMS change of the signal I(phase) - I(flat), for residual-like
+  phases (Kolmogorov, piston and tip-tilt removed) of 50 / 150 / 300 nm RMS at 750 nm.
+  `mod_step` must be at least 2 pi `mod_amp` (19 here); the time is proportional to it.
+- PSF: relative RMS change of the integrated PSF of the four cameras of `scao_multi.yml`
+  over 300 steps. This simulation is open loop (seeing-limited PSFs, SR below 2%):
+  check the error in closed loop, where the PSF changes differently between steps.
+
+With both (`mod_step: 20` and `psf_dt: 0.005` on the four cameras), `bench_scao.py`'s
+simulation takes 10.9 ms/step instead of 14.1, 21 times faster than numpy.
+
+Other approximations were tried and rejected (pyramid errors at 50 / 150 / 300 nm):
+
+| Approximation | Pyramid time | Error | Why not |
+|---|---|---|---|
+| Modulation points on the FFT pixel grid (a single forward FFT per frame) | about -45% (estimated) | 11.3% / 7.8% / 4.1% | too large for small residuals |
+| Pupil sampled with 120 pixels instead of 160 (4 per subaperture) | 4.86 -> 2.99 ms | 5.9% / 5.6% / 5.5% | above 5%; 128 pixels is worse |
+| `fft_res: 2.5` instead of 3 (minimum 2.42 here) | 6.64 ms | 3.4% / 3.7% / 4.4% | slower: FFT size 406 = 2 x 7 x 29 |
+| `fov: 1.5` instead of 2 | 4.67 ms | 0.7% / 0.9% / 1.5% | the FFT size does not change |
+
+Without approximation, building the backend for the CPU of the machine
+(`pip install ./cpp -Ccmake.define.SPECULA_CPP_NATIVE=ON`) takes the simulation from
+14.1 to 12.7 ms/step on the Ryzen (AVX2), but the module may not run on other CPUs.
 
 ## Notes for comparing results
 

@@ -46,7 +46,9 @@ class PSF(BaseProcessingObj):
         the integrated PSF and its standard deviation are accumulated, only every
         psf_dt: an approximation of the long exposure, faster with many or large PSFs.
         The SR and the integrated SR are still computed at every step, exactly
-        (from the PSF peak, which does not need the whole PSF).
+        (from the PSF peak, which does not need the whole PSF). In an open-loop
+        SCAO simulation with 1 ms steps, psf_dt = 5 ms changed the integrated PSF
+        by about 1.5% RMS over 300 steps (cpp/benchmarks/README.md).
     compute_profile_metrics : bool
         If True, also compute radial profile, FWHM and encircled-energy outputs.
         By default these summary metrics are evaluated in `finalize()` only.

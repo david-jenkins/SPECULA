@@ -180,9 +180,13 @@ When the ``specula_cpp`` module is installed, objects on the CPU (``target_devic
 use it instead of NumPy/SciPy for their heaviest computations: interpolations, rebinning,
 electric fields, and the per-step work of the ``PSF``, ``ModulatedPyramid``,
 ``AtmoPropagation`` and ``AtmoEvolution`` objects. Results are the same up to floating
-point rounding. With many or large science
-cameras, the ``psf_dt`` parameter of ``PSF`` (an approximation of the long exposure, see its
-documentation) can reduce the cost further.
+point rounding.
+
+Two parameters reduce the time further, with small errors (measured in
+``cpp/benchmarks/README.md``): the ``psf_dt`` parameter of ``PSF`` (an approximation of
+the long exposure, see its documentation; with 1 ms steps, 5 ms changed the integrated PSF
+by about 1.5%), and fewer modulation steps for ``ModulatedPyramid`` (``mod_step: 20``
+instead of the default 24 for ``mod_amp: 3`` changed its signal by about 1%).
 
 It is built from the ``cpp`` directory of the source repository, and needs a C++17
 compiler (CMake, nanobind and scikit-build-core are installed automatically during the build):
@@ -191,6 +195,10 @@ compiler (CMake, nanobind and scikit-build-core are installed automatically duri
 
    # From the root of the SPECULA repository
    pip install ./cpp
+
+   # Or optimized for the CPU of this machine (e.g. AVX2, about 10% faster),
+   # in which case the module may not run on other CPUs
+   pip install ./cpp -Ccmake.define.SPECULA_CPP_NATIVE=ON
 
 The backend is enabled automatically when the module is installed. To disable it, use the
 ``--no-cpp`` command line option, set the ``SPECULA_DISABLE_CPP`` environment variable, or
