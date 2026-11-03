@@ -12,7 +12,8 @@ import numpy as np
 import iteras
 from iteras import registry as _registry
 from iteras import (init, main_simul, cpuArray, to_xp, xp_fft, capturing, fuse,
-                   cpu_float_dtype_list, cpu_complex_dtype_list)
+                   cpu_float_dtype_list, cpu_complex_dtype_list,
+                   set_cpp_backend, cpp_compatible)
 from specula.calib_subdirs import CALIB_SUBDIRS as _CALIB_SUBDIRS
 
 ASEC2RAD = np.pi / (3600 * 180)
@@ -25,8 +26,11 @@ _registry.register_plugin(
               'specula.display'],
     calib_subdirs=_CALIB_SUBDIRS,
     env_aliases={'ITERAS_DISABLE_GPU': 'SPECULA_DISABLE_GPU',
+                 'ITERAS_DISABLE_CPP': 'SPECULA_DISABLE_CPP',
                  'ITERAS_PORT': 'SPECULA_PORT',
                  'ITERAS_DATA_FORMAT': 'SPECULA_DATA_FORMAT'},
+    # Optional C++ CPU backend (the specula-cpp package in cpp/)
+    cpp_module='specula_cpp',
 )
 
 # Values set by init(): they are read from iteras when accessed,
@@ -34,6 +38,7 @@ _registry.register_plugin(
 _ITERAS_RUNTIME_NAMES = frozenset([
     'gpuEnabled',
     'cp',
+    'cpp',
     'xp',
     'global_precision',
     'float_dtype_list',

@@ -48,7 +48,8 @@ class TestMatrix(unittest.TestCase):
         for data_format in FORMATS:
             with self.subTest(data_format=data_format):
                 path = self._path(f'm{target_device_idx}', data_format)
-                m.save(path)
+                # overwrite: the CPU test runs twice, also with the C++ backend
+                m.save(path, overwrite=True)
                 restored = Matrix.restore(path, target_device_idx=target_device_idx)
                 self.assertIs(type(restored), Matrix)
                 np.testing.assert_array_equal(cpuArray(restored.matrix), self.data)

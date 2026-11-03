@@ -1,0 +1,19 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "specula-cpp"
+version = "0.1.0"
+description = "Optional C++ CPU backend for the SPECULA adaptive optics simulator"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "INAF Arcetri Adaptive Optics group" }
+]
+dependencies = ["numpy"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.build-type = "Release"

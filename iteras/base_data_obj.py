@@ -188,8 +188,10 @@ class BaseDataObj(BaseTimeObj):
 
             if target_device_idx >= 0:
                 cloned.xp = iteras.cp
+                cloned.cpp = None
             else:
                 cloned.xp = np
+                cloned.cpp = iteras.cpp
             cloned.target_device_idx = target_device_idx
 
             self.transferDataTo(cloned, force_reallocation=True)

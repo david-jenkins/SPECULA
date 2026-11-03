@@ -115,6 +115,7 @@ class _InputItem():
                 new_value.xp = iteras.cp
             else:
                 new_value.xp = np
+                new_value.cpp = iteras.cpp
         else:
             self.logger.mpi_send_debug(f'Recv with Buffer')
             new_value = self.cloned_value

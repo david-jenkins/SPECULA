@@ -63,6 +63,8 @@ def build_parser():
     parser.add_argument('--accelerate', action='store_true',
                         help='Run the GPU work of the objects as CUDA graphs chained without '
                              'waiting for the GPU (see iteras.accelerator), as with a Accelerator section')
+    parser.add_argument('--no-cpp', action='store_true',
+                        help='Do not use the C++ CPU backend (e.g. the specula_cpp module), even if installed')
     parser.add_argument('yml_files', nargs='+', type=str,
                         help='YAML parameter files')
     return parser

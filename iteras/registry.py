@@ -16,7 +16,9 @@ The registry holds:
   (see :func:`iteras.lib.utils.import_class`);
 - the top-level package names of the plugins, used as logger roots;
 - the calibration subdirectories of the data types (see :class:`iteras.calib_manager.CalibManager`);
-- alternative names of iteras's environment variables (see :func:`getenv`).
+- alternative names of iteras's environment variables (see :func:`getenv`);
+- the name of the optional C++ CPU backend module of the plugin, if any
+  (see :func:`iteras.set_cpp_backend`).
 
 This module must stay lightweight: it is imported by iteras's ``__init__``.
 '''
@@ -45,10 +47,13 @@ _calib_subdirs = {
 # Alternative names of iteras's environment variables, {iteras name: [alias, ...]}
 _env_aliases = {}
 
+# Module of the C++ CPU backend (e.g. 'specula_cpp'), or None
+_cpp_module = None
+
 _entry_points_loaded = False
 
 
-def register_plugin(root, packages=(), calib_subdirs=None, env_aliases=None):
+def register_plugin(root, packages=(), calib_subdirs=None, env_aliases=None, cpp_module=None):
     '''
     Register a plugin.
 
@@ -63,6 +68,8 @@ def register_plugin(root, packages=(), calib_subdirs=None, env_aliases=None):
         Calibration subdirectories, see register_calib_subdirs().
     env_aliases : dict, optional
         Alternative names of iteras's environment variables, see register_env_alias().
+    cpp_module : str, optional
+        Name of the module of the plugin's C++ CPU backend, see register_cpp_module().
     '''
     if root not in _plugin_roots:
         _plugin_roots.append(root)
@@ -71,6 +78,8 @@ def register_plugin(root, packages=(), calib_subdirs=None, env_aliases=None):
         register_calib_subdirs(calib_subdirs)
     for name, alias in (env_aliases or {}).items():
         register_env_alias(name, alias)
+    if cpp_module:
+        register_cpp_module(cpp_module)
 
 
 def register_packages(*packages):
@@ -96,6 +105,21 @@ def register_env_alias(name, alias):
     aliases = _env_aliases.setdefault(name, [])
     if alias not in aliases:
         aliases.append(alias)
+
+
+def register_cpp_module(name):
+    '''
+    Register *name* as the module of the C++ CPU backend: its kernels are used
+    by the objects on the CPU when the module can be imported and the backend
+    is enabled (see iteras.init() and iteras.set_cpp_backend()).
+    '''
+    global _cpp_module
+    _cpp_module = name
+
+
+def cpp_module():
+    '''Name of the C++ CPU backend module, or None if no plugin has one'''
+    return _cpp_module
 
 
 def getenv(name, default=None):

@@ -1,7 +1,8 @@
 import inspect
 from functools import cache
 
-from specula import np
+import specula
+from specula import np, cpp_compatible
 
 
 @cache
@@ -35,7 +36,8 @@ def affine_transform(data, matrix, output, xp):
     On CPU, if matrix[:, :2] is a signed permutation (shifts, rot90(), flips) and
     all samples are inside data, the result is a weighted sum of up to four
     strided views of data. Otherwise, a bilinear interpolation is computed in
-    chunks of output elements. Both are faster than scipy.ndimage.affine_transform.
+    chunks of output elements, or by the C++ backend if enabled. Both are faster
+    than scipy.ndimage.affine_transform.
 
     Parameters
     ----------
@@ -55,7 +57,11 @@ def affine_transform(data, matrix, output, xp):
         return
     linear, offset = matrix[:, :2], matrix[:, 2]
     if not (_is_signed_permutation(linear) and _permuted(data, linear, offset, output)):
-        _bilinear(data, linear, offset, output)
+        if specula.cpp is not None and data.dtype in (np.float32, np.float64) and \
+                cpp_compatible(data.dtype, data, output):
+            specula.cpp.affine_bilinear(data, np.ascontiguousarray(matrix, dtype=np.float64), output)
+        else:
+            _bilinear(data, linear, offset, output)
 
 
 def _is_signed_permutation(linear):
