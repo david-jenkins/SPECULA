@@ -13,7 +13,7 @@ license-files = ["LICENSE", "third_party/pocketfft/LICENSE.md"]
 authors = [
     { name = "INAF Arcetri Adaptive Optics group" }
 ]
-dependencies = ["numpy"]
+dependencies = ["numpy", "threadpoolctl"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"

@@ -1,6 +1,7 @@
 import specula
 specula.init(0)  # Default target device
 
+import os
 import tempfile
 import unittest
 from unittest import mock
@@ -81,6 +82,25 @@ class TestCppBackend(unittest.TestCase):
             self.assertIsNotNone(ElectricField(4, 4, 0.1, target_device_idx=-1).cpp)
         with cpp_backend(False):
             self.assertIsNone(ElectricField(4, 4, 0.1, target_device_idx=-1).cpp)
+
+    def test_blas_threads(self):
+        # One BLAS thread while the backend is enabled (busy-waiting BLAS threads slow it down),
+        # unless the number of BLAS threads is set in the environment
+        import iteras
+        import threadpoolctl
+
+        def blas_threads():
+            return {p['num_threads'] for p in threadpoolctl.threadpool_info() if p['user_api'] == 'blas'}
+
+        env = {k: v for k, v in os.environ.items() if k not in iteras._BLAS_THREADS_ENV}
+        with cpp_backend(False):
+            original = blas_threads()
+            with mock.patch.dict(os.environ, env, clear=True):
+                with cpp_backend(True):
+                    self.assertEqual(blas_threads(), {1})
+                self.assertEqual(blas_threads(), original)
+                with mock.patch.dict(os.environ, {'OPENBLAS_NUM_THREADS': '4'}), cpp_backend(True):
+                    self.assertEqual(blas_threads(), original)
 
     def test_interp2d(self):
         rng = np.random.default_rng(1)

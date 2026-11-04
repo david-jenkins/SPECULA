@@ -26,6 +26,7 @@ gpuEnabled = False
 cp = None
 cpp = None          # C++ CPU backend module when enabled, otherwise None
 _cpp_module = None  # C++ CPU backend module, if it has been imported
+_blas_limiter = None  # threadpoolctl limit on the BLAS threads while the C++ backend is enabled
 xp = None
 global_precision = None
 float_dtype_list = None
@@ -169,9 +170,46 @@ def set_cpp_backend(enabled):
             import importlib
             _cpp_module = importlib.import_module(name)
         cpp = _cpp_module
+        _limit_blas_threads()
     else:
         cpp = None
+        _restore_blas_threads()
     return previous
+
+
+# Environment variables that set the number of BLAS threads: if one is set, it is left as it is
+_BLAS_THREADS_ENV = ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS',
+                     'BLIS_NUM_THREADS', 'VECLIB_MAXIMUM_THREADS')
+
+
+def _limit_blas_threads():
+    '''
+    Use a single BLAS thread while the C++ backend is enabled. After a numpy/scipy
+    BLAS call (e.g. a matrix product), the idle OpenBLAS threads busy-wait on every
+    core and slow down the multithreaded C++ kernels: about 3x for a whole simulation.
+    '''
+    global _blas_limiter
+    import os
+    if _blas_limiter is not None or any(v in os.environ for v in _BLAS_THREADS_ENV):
+        return
+    logger = get_iteras_logger(__name__)
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:
+        logger.warning('threadpoolctl is not installed: the BLAS threads can slow down the C++ backend, '
+                       'set OPENBLAS_NUM_THREADS=1 to avoid it')
+        return
+    # Only the BLAS libraries already loaded are limited: load scipy's too (numpy's is loaded)
+    import scipy.linalg  # noqa: F401
+    _blas_limiter = threadpool_limits(limits=1, user_api='blas')
+    logger.info('C++ CPU backend: BLAS limited to 1 thread')
+
+
+def _restore_blas_threads():
+    global _blas_limiter
+    if _blas_limiter is not None:
+        _blas_limiter.restore_original_limits()
+        _blas_limiter = None
 
 
 def cpp_compatible(dtype, *arrays):
