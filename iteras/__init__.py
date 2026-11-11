@@ -264,11 +264,15 @@ def capturing():
 def xp_fft(xp):
     '''
     FFT functions for the array module *xp*: scipy.fft for numpy (faster than
-    numpy.fft, especially in single precision), xp.fft otherwise.
+    numpy.fft, especially in single precision), cupyx.scipy.fft for cupy,
+    xp.fft otherwise. The scipy and cupyx versions accept overwrite_x.
     '''
     if xp is np:
         import scipy.fft
         return scipy.fft
+    if cp is not None and xp is cp:  # pragma: gpu
+        import cupyx.scipy.fft
+        return cupyx.scipy.fft
     return xp.fft
 
 
@@ -326,8 +330,9 @@ def main_simul(yml_files: list,
                trace_gpu_events: bool=False,
                allocate: bool=False,
                reallocate: bool=False,
-               accelerate: bool=False,
+               accelerate: bool=True,
                no_cpp: bool=False,
+               data_objects_on_device: bool=False,
                ):
 
     # Set logging level for the "parent" loggers of iteras and its plugins
@@ -397,6 +402,7 @@ def main_simul(yml_files: list,
                 allocate=allocate,
                 reallocate=reallocate,
                 accelerate=accelerate,
+                data_objects_on_device=data_objects_on_device,
             ).run()
     except Exception:
         if mpi:

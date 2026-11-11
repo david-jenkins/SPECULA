@@ -1191,7 +1191,8 @@ class TestAllocatorRun(AllocatorTestCase):
         try:
             with mock.patch('iteras.allocator.profile_run', counting_run), \
                     iteras.cp.cuda.using_allocator(pool.malloc):
-                Simul(path, speed_report=False).run()
+                # Not accelerated: the CUDA graphs would add their temporaries to the 45 MB
+                Simul(path, speed_report=False, accelerate=False).run()
         finally:
             pool.free_all_blocks()
         self.assertGreater(len(calls), 2)
@@ -1205,7 +1206,8 @@ class TestAllocatorRun(AllocatorTestCase):
     def test_gpu_profile(self):
         params = json.loads(json.dumps(self.params))
         params['architecture'] = self.arch(mode='plan', nodes='local', memory_source='probe')
-        simul = Simul(self.write(params), speed_report=False)
+        # Not accelerated: the costs are read below with the key of that mode
+        simul = Simul(self.write(params), speed_report=False, accelerate=False)
         simul.run()
         profile = Profile(params['architecture']['allocation_file'].replace('.yml', '_profile.json'))
         kinds = {k.split('|')[1] for k in profile.entries}
@@ -1787,6 +1789,9 @@ class TestSmallBranches(AllocatorTestCase):
         from iteras.scripts.iteras_main import build_parser
         args = build_parser().parse_args(['--accelerate', '--allocate', '--reallocate', 'p.yml'])
         self.assertTrue(args.accelerate and args.allocate and args.reallocate)
+        self.assertFalse(args.data_objects_on_device)
+        args = build_parser().parse_args(['--data-objects-on-device', 'p.yml'])
+        self.assertTrue(args.data_objects_on_device)
 
     def test_mpi_bytes_without_cost(self):
         g = self.graph()

@@ -41,31 +41,75 @@ inline T abs2(std::complex<T> v) {
 }
 
 // ---------------------------------------------------------------------------
-// lib/interp2d.py: bilinear interpolation at precomputed, clamped coordinates
+// lib/interp2d.py: bilinear interpolation at precomputed coordinates, with the
+// outside rules of the Interp2D CUDA kernels (Interp2D.OUTSIDE_MODES): outside the
+// array, the input is extended by a virtual 1-pixel ring, whose values are the edge
+// (mode 0), zero (mode 1) or the linear extrapolation 2 a[0] - a[1] along each axis
+// (mode 2, separable at the corners). The coordinates are clamped to [0, N-1]
+// (mode 0) or to the ring [-1, N] (modes 1, 2).
+
+enum InterpOutside { kOutsideEdge = 0, kOutsideZero = 1, kOutsideLinear = 2 };
+
+// Element (x, y), or a ring value for x or y in {-1, N}
+template <class T>
+inline T interp_fetch(const T *in, idx nx, idx ny, idx x, idx y, int mode) {
+    bool out_x = x < 0 || x >= nx;
+    bool out_y = y < 0 || y >= ny;
+    if (mode == kOutsideZero && (out_x || out_y))
+        return T(0);
+    idx x0 = std::min(std::max<idx>(x, 0), nx - 1);
+    idx y0 = std::min(std::max<idx>(y, 0), ny - 1);
+    if (mode != kOutsideLinear || !(out_x || out_y))
+        return in[y0 * nx + x0];
+    // Linear: P = 2 a[edge] - a[next to the edge], along each axis out of the array
+    idx x1 = out_x ? (x < 0 ? 1 : nx - 2) : x0;
+    idx y1 = out_y ? (y < 0 ? 1 : ny - 2) : y0;
+    T cx0 = out_x ? T(2) : T(1), cx1 = out_x ? T(-1) : T(0);
+    T cy0 = out_y ? T(2) : T(1), cy1 = out_y ? T(-1) : T(0);
+    return cy0 * (cx0 * in[y0 * nx + x0] + cx1 * in[y0 * nx + x1]) +
+           cy1 * (cx0 * in[y1 * nx + x0] + cx1 * in[y1 * nx + x1]);
+}
 
 template <class T>
 struct Bilinear {
-    idx i00, i01, i10, i11;
+    idx xi, yi;
     T xd, yd;
+    bool inside;  // the 4 neighbours are in the array (almost all the points)
 
-    // Same indexing as the Interp2D CUDA kernel. The coordinates are >= 0 (Interp2D
-    // clamps them), so truncation is floor, and much faster without SSE4.1.
-    Bilinear(idx in_dx, idx in_dy, T x, T y) {
-        idx xi = static_cast<idx>(x);
-        idx yi = static_cast<idx>(y);
-        idx xi2 = std::min(xi + 1, in_dx - 1);
-        idx yi2 = std::min(yi + 1, in_dy - 1);
+    // Same indexing as the Interp2D CUDA kernels
+    Bilinear(idx nx, idx ny, T x, T y, int mode) {
+        T lo = mode == kOutsideEdge ? T(0) : T(-1);
+        x = std::min(std::max(x, lo), mode == kOutsideEdge ? T(nx - 1) : T(nx));
+        y = std::min(std::max(y, lo), mode == kOutsideEdge ? T(ny - 1) : T(ny));
+        // Floor without a libm call (truncation, then one step down for negatives).
+        // At the last row/column (N-1, or N on the ring) keep the first neighbour on it.
+        xi = static_cast<idx>(x);
+        yi = static_cast<idx>(y);
+        xi -= static_cast<T>(xi) > x;
+        yi -= static_cast<T>(yi) > y;
+        xi = std::min(xi, nx - 1);
+        yi = std::min(yi, ny - 1);
         xd = x - static_cast<T>(xi);
         yd = y - static_cast<T>(yi);
-        i00 = yi * in_dx + xi;
-        i01 = yi * in_dx + xi2;
-        i10 = yi2 * in_dx + xi;
-        i11 = yi2 * in_dx + xi2;
+        inside = xi >= 0 && yi >= 0 && xi + 1 < nx && yi + 1 < ny;
     }
 
-    T operator()(const T *in) const {
-        return in[i00] * (1 - xd) * (1 - yd) + in[i01] * xd * (1 - yd) +
-               in[i10] * yd * (1 - xd) + in[i11] * xd * yd;
+    T operator()(const T *in, idx nx, idx ny, int mode) const {
+        T a, b, c, d;
+        if (inside) {
+            const T *p = in + yi * nx + xi;
+            a = p[0];
+            b = p[1];
+            c = p[nx];
+            d = p[nx + 1];
+        } else {
+            a = interp_fetch(in, nx, ny, xi, yi, mode);
+            b = interp_fetch(in, nx, ny, xi + 1, yi, mode);
+            c = interp_fetch(in, nx, ny, xi, yi + 1, mode);
+            d = interp_fetch(in, nx, ny, xi + 1, yi + 1, mode);
+        }
+        T wx = 1 - xd, wy = 1 - yd;
+        return a * wx * wy + b * xd * wy + c * yd * wx + d * xd * yd;
     }
 };
 
@@ -73,22 +117,24 @@ struct Bilinear {
 constexpr idx kInterpGrain = kGrain / 8;
 
 template <class T>
-void interp2d(const T *in, idx in_dy, idx in_dx, const T *xx, const T *yy, T *out, idx n_out) {
+void interp2d(const T *in, idx in_dy, idx in_dx, const T *xx, const T *yy, T *out, idx n_out,
+              int mode) {
     parallel_for(n_out, kInterpGrain, [&](idx b, idx e) {
         for (idx i = b; i < e; ++i)
-            out[i] = Bilinear<T>(in_dx, in_dy, xx[i], yy[i])(in);
+            out[i] = Bilinear<T>(in_dx, in_dy, xx[i], yy[i], mode)(in, in_dx, in_dy, mode);
     });
 }
 
-// AtmoPropagation, geometric case: amp_out *= interp(amp), phase_out += interp(phase)
+// AtmoPropagation, geometric case: amp_out *= interp(amp), phase_out += interp(phase),
+// with the 'edge' rule of Interp2D.interpolate()'s default
 template <class T>
 void interp2d_accumulate(const T *amp, const T *phase, idx in_dy, idx in_dx, const T *xx,
                          const T *yy, T *amp_out, T *phase_out, idx n_out) {
     parallel_for(n_out, kInterpGrain, [&](idx b, idx e) {
         for (idx i = b; i < e; ++i) {
-            Bilinear<T> w(in_dx, in_dy, xx[i], yy[i]);
-            amp_out[i] *= w(amp);
-            phase_out[i] += w(phase);
+            Bilinear<T> w(in_dx, in_dy, xx[i], yy[i], kOutsideEdge);
+            amp_out[i] *= w(amp, in_dx, in_dy, kOutsideEdge);
+            phase_out[i] += w(phase, in_dx, in_dy, kOutsideEdge);
         }
     });
 }

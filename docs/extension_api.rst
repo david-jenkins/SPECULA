@@ -108,7 +108,7 @@ Methods to override
        ``inputs`` and ``outputs`` after ``setup()``.
    * - ``setup()``
      - Initialization that needs the connected inputs. Must call the base class
-       method first. Call ``build_stream()`` here to use a CUDA graph.
+       method first.
    * - ``prepare_trigger(t)``
      - Work that cannot be captured in a CUDA graph (host-side code,
        reallocations), run when the object is ready. Must call the base class
@@ -129,9 +129,6 @@ Methods to override
    * - ``get_resolved_seed()``
      - Return the random seed used, if chosen at construction, so that a replay
        reproduces the same values. Default: ``None``.
-   * - ``graph_input_ptrs()``
-     - Override to exclude, from the check made at each launch of the CUDA
-       graph, inputs that the graph does not read.
    * - ``can_accelerate()``
      - Called by the :doc:`accelerator <accelerator>` just before it captures
        ``trigger_code()`` in a CUDA graph launched at each step instead. Return
@@ -142,9 +139,13 @@ Methods to override
        ``prepare_trigger()``, which runs at each step); matrix products use
        ``specula.lib.graph_matmul.matmul()``. Otherwise return ``False``, or a
        string saying why (it is called again at the next trigger). Default:
-       ``True`` for objects that build their own CUDA graph, ``False`` otherwise.
+       ``False``.
        A derived class that redefines ``trigger_code()`` is not accelerated
        unless it declares ``can_accelerate()`` itself.
+   * - ``internal_objects()``
+     - Processing objects that the object creates and triggers itself (like
+       the slices of ``DistributedSH``), which are not simulation objects: the
+       accelerator also accelerates them. Default: none.
 
 Hooks called by Simul
 ~~~~~~~~~~~~~~~~~~~~~
@@ -168,6 +169,16 @@ The default implementations do nothing; override them to change how
        (writing files, interacting with the user): the :doc:`allocator <allocator>`
        never places them on a GPU. Used by ``DataPrint``,
        ``DisplayServer`` and ``InteractiveInput``.
+   * - ``host_data_objects``
+     - Class attribute: a tuple of constructor parameter names. The data
+       objects given for them as ``<name>_object`` in the parameter file are
+       restored on the CPU instead of the device of the object. For large
+       inputs used only once in ``__init__``, e.g. to compute a smaller matrix,
+       which the class then builds on its device in blocks, so that the inputs
+       are never on the GPU all at once. Default: empty. Used by
+       ``ModalrecImplicitPolc`` for ``recmat``, ``projmat`` and ``intmat``.
+       The ``--data-objects-on-device`` command line option ignores it, trading
+       the host memory peak for a GPU memory peak.
    * - ``runs_on_main_process_only()``
      - Class method. Return ``True`` for classes that must run in the main
        process (MPI rank 0), like ``DisplayServer`` and ``InteractiveInput``.
@@ -213,16 +224,14 @@ Methods called by the framework
 
 ``check_ready()``, ``trigger()``, ``send_outputs()`` and the other methods
 used by the loop are called by the framework and should not be overridden.
-Two methods can be called by derived classes to use CUDA graphs:
-``build_stream()``, normally in ``setup()``, and ``invalidate_graph()``, when
-something frozen in the graph at capture time changes, so that the graph is
-captured again at the next step.
+Derived classes call ``invalidate_graph()`` when something frozen in the CUDA
+graph at capture time changes, so that the graph is captured again at the next
+step.
 
-The GPU work of an object must run on the default stream (the current one) or
-on the stream created by ``build_stream()``, which is a blocking stream: CUDA
-then orders it with the work of the other objects, which read its outputs on
-the default stream, possibly without the host waiting (the accelerator, the
-asynchronous copies of ``DataStore``). An object must not write its outputs
+The GPU work of an object must run on the default stream (the current one), or
+on a blocking stream: CUDA then orders it with the work of the other objects,
+which read its outputs on the default stream, possibly without the host waiting
+(the accelerator, the asynchronous copies of ``DataStore``). An object must not write its outputs
 from a stream it creates as non-blocking (``Stream(non_blocking=True)``): the
 next step could overwrite them while they are still being read.
 
@@ -272,6 +281,13 @@ corresponding feature.
      - Description of the data, stored with it by ``DataStore`` (``OBJ_TYPE``
        must be the class name), and creation of an empty object from it by
        ``DataSource``.
+   * - ``get_metadata_arrays()``, ``set_metadata_arrays(arrays)``
+     - Static metadata that does not fit in a header, as a dictionary of
+       numpy arrays by name (for example the 2d display layout of ``Slopes``).
+       ``DataStore`` writes it once per file, next to the time series, and
+       ``DataSource`` gives it back to the object created by ``from_header()``.
+       Names are case insensitive; ``data`` and ``times`` are reserved.
+       Default: no metadata.
    * - ``save(filename)``, ``restore(filename, target_device_idx=None)``
      - Saving and loading: ``restore()`` is used for the ``_object`` and
        ``tag`` parameters, through the calibration manager. Implement them
@@ -287,7 +303,10 @@ corresponding feature.
 
 All the arrays of a data object are copied by ``transferDataTo()`` and
 ``copyTo()``, which the framework uses to move data between devices: derived
-classes do not need to implement them.
+classes do not need to implement them. Attributes that are not arrays are not
+copied at each step: keep static data that never changes (such as the
+``SlopesLayout`` of ``Slopes``) in such an attribute, and share it in
+``transferDataTo()``.
 
 Class hooks
 ~~~~~~~~~~~

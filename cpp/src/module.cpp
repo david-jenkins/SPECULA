@@ -123,15 +123,19 @@ void require_shape(const A &a, std::initializer_list<idx> shape, const char *nam
 // ---------------------------------------------------------------------------
 
 template <class T>
-void py_interp2d(in_array<T> in, in_array<T> xx, in_array<T> yy, out_array<T> out) {
+void py_interp2d(in_array<T> in, in_array<T> xx, in_array<T> yy, out_array<T> out, int mode) {
     require(in.ndim() == 2 && out.ndim() == 2, "input and output must be 2D");
+    require(mode == kOutsideEdge || mode == kOutsideZero || mode == kOutsideLinear,
+            "mode must be 0 (edge), 1 (zero) or 2 (linear)");
+    require(mode != kOutsideLinear || (dim(in, 0) >= 2 && dim(in, 1) >= 2),
+            "the linear mode needs at least 2 pixels along each axis");
     idx n_out = count(out);
     require(count(xx) == n_out && count(yy) == n_out, "xx and yy must have one element per output pixel");
     const T *pin = in.data(), *px = xx.data(), *py = yy.data();
     T *pout = out.data();
     idx ny = dim(in, 0), nx = dim(in, 1);
     nb::gil_scoped_release release;
-    interp2d(pin, ny, nx, px, py, pout, n_out);
+    interp2d(pin, ny, nx, px, py, pout, n_out, mode);
 }
 
 template <class T>
@@ -387,7 +391,7 @@ void py_sh_cut_into_image(in_array<T> psf, idx dimx, idx c0, in_array<T> mask, o
 template <class T>
 void bind_real(nb::module_ &m) {
     auto a = [](const char *name) { return nb::arg(name).noconvert(); };
-    m.def("interp2d", &py_interp2d<T>, a("input"), a("xx"), a("yy"), a("out"));
+    m.def("interp2d", &py_interp2d<T>, a("input"), a("xx"), a("yy"), a("out"), nb::arg("mode") = 0);
     m.def("interp2d_accumulate", &py_interp2d_accumulate<T>, a("amp"), a("phase"), a("xx"), a("yy"),
           a("amp_out"), a("phase_out"));
     m.def("affine_bilinear", &py_affine_bilinear<T>, a("data"), a("matrix"), a("out"));

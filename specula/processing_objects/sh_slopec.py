@@ -3,8 +3,7 @@ import logging
 import numpy as np
 
 from specula import fuse
-from specula.base_processing_obj import InputDesc, OutputDesc
-from specula.data_objects.pixels import Pixels
+from specula.base_processing_obj import OutputDesc
 from specula.data_objects.slopes import Slopes
 from specula.data_objects.subap_data import SubapData
 from specula.lib.make_mask import make_mask
@@ -20,9 +19,9 @@ def clamp_generic_less(x, c, y, xp):
 
 @fuse(kernel_name='sh_slopes_normalize')
 def sh_slopes_normalize(subap_tot, sx_raw, sy_raw, mean_subap_tot, mult_factor, sx, sy, xp):
-    # Subapertures with a denominator below 1e-3 times the average get zero slopes
-    factor = 1.0 / subap_tot
-    factor = xp.where(factor > 1.0 / (mean_subap_tot * 1e-3), 0, factor) * mult_factor
+    # Subapertures with a denominator below 1e-3 times the average (negative
+    # ones included, possible with clamp_negative=False) get zero slopes
+    factor = xp.where(subap_tot < mean_subap_tot * 1e-3, 0, 1.0 / subap_tot) * mult_factor
     sx[:] = sx_raw * factor
     sy[:] = sy_raw * factor
 
@@ -42,9 +41,64 @@ class ShSlopec(Slopec):
     changing them. The inputs must be updated in place by their producers
     (a reallocated input raises an error).
 
-    Derived classes do not use a CUDA graph, since their compute_slopes()
-    may have host-side logic. Those with GPU-only code can opt in calling
-    self.build_stream(capture=False) in their setup().
+    clamp_negative (see Slopec): the negative pixels are set to zero after
+    the threshold subtraction. Subapertures with a denominator below 1e-3
+    times the average, negative ones included (possible with
+    clamp_negative=False), get zero slopes. It has no effect with
+    thr_pedestal, which sets the pixels below the threshold to zero.
+
+    Parameters
+    ----------
+    subapdata : SubapData
+        Valid subapertures and their pixels on the detector.
+    sn : Slopes, optional
+        Slope null (see Slopec).
+    thr_value : float [counts], optional
+        If > 0, subtracted from all the pixels before the centroid. Default
+        -1 (no subtraction). Only one of thr_value and thr_ratio_value can
+        be set.
+    thr_ratio_value : float, optional
+        If > 0, a threshold equal to this fraction of the brightest pixel of
+        each subaperture is subtracted from its pixels. Default 0.
+    exp_weight : float, optional
+        Exponent of the pixel coordinates in the centroid weights:
+        ``sign(x) |x|^exp_weight``. Default 1 (center of gravity).
+    filtmat : array_like, optional
+        Slope filter (see Slopec).
+    weightedPixRad : float [pixels], optional
+        If > 0, the centroid weights are multiplied by a Gaussian of FWHM
+        2 * weightedPixRad (weighted center of gravity), or, with windowing,
+        by a circular window of radius weightedPixRad. Default 0.
+    windowing : bool, optional
+        Use a circular window instead of the Gaussian (see weightedPixRad).
+        Default False.
+    weight_int_pixel_dt : float [s], optional
+        If > 0, the pixels are accumulated over this time and the
+        accumulated image of each subaperture (minus its minimum) is used to
+        weight its pixels: normalized to its maximum, or, with
+        window_int_pixel, as a binary window. Default 0.
+    window_int_pixel : bool, optional
+        With weight_int_pixel_dt > 0, use as weight the binary window of the
+        pixels above window_int_threshold in the accumulated image (made
+        symmetric by a flip). Default False.
+    window_int_threshold : float [counts], optional
+        Threshold of window_int_pixel, on the accumulated image minus its
+        minimum. Default 1.
+    vecWeiPixRadT : array_like, optional
+        Time-dependent weightedPixRad: rows [weightedPixRad, time in s]; from
+        each time on, the corresponding radius is used. Default None.
+    interleave : bool, optional
+        Slope order (see Slopec). Default False.
+    clamp_negative : bool, optional
+        Set the negative pixels to zero (see Slopec). Default True.
+    target_device_idx : int, optional
+        Device index (-1 for CPU). Default: global setting.
+    precision : int, optional
+        0 for double, 1 for single precision. Default: global setting.
+
+    Derived classes are not accelerated, since their compute_slopes()
+    may have host-side logic. Those with GPU-only code can opt in
+    overriding can_accelerate().
     """
 
     def __init__(self,
@@ -61,6 +115,7 @@ class ShSlopec(Slopec):
                  window_int_threshold: float=1.0,
                  vecWeiPixRadT: list=None,
                  interleave: bool=False,
+                 clamp_negative: bool=True,
                  target_device_idx: int = None,
                  precision: int = None):
 
@@ -72,6 +127,7 @@ class ShSlopec(Slopec):
                          filtmat=filtmat,
                          weight_int_pixel_dt=weight_int_pixel_dt,
                          interleave=interleave,
+                         clamp_negative=clamp_negative,
                          target_device_idx=target_device_idx,
                          precision=precision)
         self.thr_value = thr_value
@@ -88,8 +144,6 @@ class ShSlopec(Slopec):
         self.thr_pedestal = False
         self.mult_factor = 0.0
         self.quadcell_mode = False
-        self.two_steps_cog = False
-        self.cog_2ndstep_size = 0
 
         self.exp_weight = exp_weight
         self.window_int_pixel = window_int_pixel
@@ -99,12 +153,10 @@ class ShSlopec(Slopec):
         # Weights for the slope computation, see set_xy_weights()
         self._weights = None
 
-        self.accumulated_slopes = Slopes(self.nslopes(), target_device_idx=self.target_device_idx)
         self.set_xy_weights()
         self.outputs['out_subapdata'] = self.subapdata
 
-        self.slopes.single_mask = self.subapdata.single_mask()
-        self.slopes.display_map = self.subapdata.display_map
+        self.slopes.layout = self.subapdata.slopes_layout()
 
     @classmethod
     def output_names(cls):
@@ -131,13 +183,9 @@ class ShSlopec(Slopec):
             return None
         return self._int_pixels_weight.T
 
-    def setup(self):
-        super().setup()
-        # The CUDA graph is captured at the first trigger(), since the input
-        # pixels are only available then. Derived classes must opt in, see
-        # the class docstring.
-        if type(self) is ShSlopec:
-            self.build_stream(capture=False)
+    def can_accelerate(self):
+        # Derived classes must opt in, see the class docstring.
+        return type(self) is ShSlopec
 
     def set_xy_weights(self):
         if self.subapdata:
@@ -148,9 +196,6 @@ class ShSlopec(Slopec):
             self.yweights = self.to_xp(out['y'], dtype=self.dtype)
             self.xcweights = self.to_xp(out['xc'], dtype=self.dtype)
             self.ycweights = self.to_xp(out['yc'], dtype=self.dtype)
-            self.xweights_flat = self.xweights.reshape(self.subapdata.np_sub * self.subapdata.np_sub, 1)
-            self.yweights_flat = self.yweights.reshape(self.subapdata.np_sub * self.subapdata.np_sub, 1)
-            self.mask_weighted_flat = self.mask_weighted.reshape(self.subapdata.np_sub * self.subapdata.np_sub, 1)
             # Denominator, x and y weights as rows of a single (3, np_sub*np_sub) array.
             # Updated in place, since its address is frozen in the CUDA graph.
             weights = self.xp.vstack([self.mask_weighted.ravel(), self.xweights.ravel(), self.yweights.ravel()])
@@ -317,7 +362,8 @@ class ShSlopec(Slopec):
             # In place, with ufuncs: on these large arrays they are faster than fused kernels
             if self.thr_ratio_value > 0 or thr != 0:
                 self.xp.subtract(pixels, thr, out=pixels)
-            self.xp.maximum(pixels, 0, out=pixels)
+            if self.clamp_negative:
+                self.xp.maximum(pixels, 0, out=pixels)
 
         # Denominator, x and y weighted sums, computed together
         subap_tot, sx_raw, sy_raw = sum_product(pixels[None, :, :], self._weights[:, None, :],

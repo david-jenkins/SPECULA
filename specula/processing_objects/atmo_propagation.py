@@ -1,10 +1,10 @@
-from specula.base_value import BaseValue
 from specula.lib.make_xy import make_xy
 from specula.lib.utils import local_mean_rebin
 from specula.base_processing_obj import BaseProcessingObj, InputDesc, OutputDesc
 from specula.lib.interp2d import Interp2D
+from specula.lib.geometric_propagation import GeometricPropagation, footprint
 from specula.data_objects.electric_field import ElectricField
-from specula.connections import InputList, InputValue
+from specula.connections import InputList
 from specula.data_objects.layer import Layer
 from specula.lib.air_refraction import MatharAirRefraction
 from specula import cpuArray, xp_fft
@@ -21,6 +21,10 @@ class AtmoPropagation(BaseProcessingObj):
     layers. It can perform both geometric and physical (Fresnel) propagation, depending on the
     configuration.
     """
+    # On GPU, the geometric propagation with one field per source computes all the
+    # sources in a single kernel (see specula.lib.geometric_propagation)
+    fused_kernel = True
+
     def __init__(self,
                  simul_params: SimulParams,
                  source_dict: dict,
@@ -38,11 +42,11 @@ class AtmoPropagation(BaseProcessingObj):
                  target_device_idx=None,
                  precision=None):
         """
-        Note
-        ----
+        Notes
+        -----
         - By default, all atmospheric phase screens are referenced to a wavelength of 500 nm.
         - Layer heights are always defined at zenith and projected according to the simulation
-        zenith angle (coming from simul_params).
+          zenith angle (coming from simul_params).
 
         Parameters
         ----------
@@ -142,6 +146,7 @@ class AtmoPropagation(BaseProcessingObj):
                 )
 
         self.doFresnel = doFresnel
+        self.geometric_propagation = None     # see setup_geometric_propagation()
         if self.doFresnel:
             self.ef_size_padded = self.pixel_pupil * padding_factor
             self.propagators = None
@@ -349,9 +354,6 @@ class AtmoPropagation(BaseProcessingObj):
         steps = [i for i, p in enumerate(self.propagators) if p is not None]
         self._last_propagation_step = steps[-1] if steps else None
 
-        # pre-allocate arrays for propagation
-        self.ef_padded = self.xp.zeros([self.ef_size_padded, self.ef_size_padded], dtype=self.complex_dtype)
-
         # set wavelengthInNm field for all output EFs
         for source_name in self.source_dict.keys():
             self.outputs['out_'+source_name+'_ef'].wavelength_in_nm = self.wavelengthInNm
@@ -387,10 +389,23 @@ class AtmoPropagation(BaseProcessingObj):
                 )
                 layer.phaseInNm[~mask_valid] = local_mean[~mask_valid]
 
-    def trigger_code(self):
+    def propagation_layers(self):
+        '''The layers in the order they are crossed'''
         layer_list = self.common_layer_list + self.atmo_layer_list
         if self.prop_sign == 1:  # reverse layers for downwards propagation
             layer_list = layer_list[::-1]
+        return layer_list
+
+    def can_accelerate(self):
+        # The Fresnel propagation is not captured
+        return not self.doFresnel
+
+    def trigger_code(self):
+        if self.geometric_propagation is not None:  # pragma: gpu
+            self.geometric_propagation.run()
+            return
+
+        layer_list = self.propagation_layers()
 
         for source_name, source in self.source_dict.items():
 
@@ -582,6 +597,7 @@ class AtmoPropagation(BaseProcessingObj):
 
         self.interpolators = {}
         self.chromatic_shifts_m = {}
+        self._footprints = {source: {} for source in self.source_dict.values()}
         layer_list = self.common_layer_list + self.atmo_layer_list
         for source in self.source_dict.values():
             self.interpolators[source] = {}
@@ -609,6 +625,9 @@ class AtmoPropagation(BaseProcessingObj):
                                          f' Layer height: {layer.height} m, size: {layer.size}.')
                     else:
                         self.interpolators[source][layer] = li
+                        if self._fused_propagation():  # pragma: gpu
+                            self._footprints[source][layer] = footprint(li, layer, self.pixel_pupil)
+                            li.xx = li.yy = None
                 else:
                     raise ValueError('Invalid layer/source geometry')
 
@@ -733,7 +752,33 @@ class AtmoPropagation(BaseProcessingObj):
         if self.doFresnel:
             self.doFresnel_setup()
         else:
-            self.build_stream()
+            self.setup_geometric_propagation()
+
+    def setup_geometric_propagation(self):
+        '''
+        On GPU, with one field per source (mergeLayersContrib), all the sources
+        are computed by a single kernel, from the coordinates of the interpolators.
+        The interpolators then release their coordinates, which take as much
+        memory as the fields of all the sources on all the layers.
+        '''
+        if self._fused_propagation():  # pragma: gpu
+            layer_list = self.propagation_layers()
+            footprints = [[self._footprints[source].get(layer) or
+                           footprint(self.interpolators[source][layer], layer, self.pixel_pupil)
+                           for layer in layer_list]
+                          for source in self.source_dict.values()]
+            outputs = [self.outputs['out_' + name + '_ef'] for name in self.source_dict]
+            self.geometric_propagation = GeometricPropagation(layer_list, outputs, footprints, self.dtype)
+            for interpolators in self.interpolators.values():
+                for interpolator in interpolators.values():
+                    if interpolator is not None:
+                        interpolator.xx = interpolator.yy = None
+        # GeometricPropagation keeps its own copy of the coordinates
+        self._footprints = None
+
+    def _fused_propagation(self):
+        return (self.fused_kernel and self.target_device_idx >= 0 and self.mergeLayersContrib
+                and not self.doFresnel)
 
     def check_output_names(self):
         # AtmoPropagation outputs are created dynamically from stored data files;

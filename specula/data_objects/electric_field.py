@@ -1,8 +1,14 @@
 from astropy.io import fits
 import numpy as np
 
+from specula import fuse
 from specula.base_data_obj import BaseDataObj
 from iteras.lib import storage
+
+
+@fuse(kernel_name='ef_at_lambda')
+def _ef_at_lambda(amp, phase, k, out, xp):
+    out[...] = xp.exp(1j * (phase * k)) * amp
 
 
 class ElectricField(BaseDataObj):
@@ -213,7 +219,9 @@ class ElectricField(BaseDataObj):
         slicex : slice, optional
             The slice along the x-axis (default: None, which means all columns).
         out : xp.ndarray, optional
-            The output array (default: None).
+            The output array (default: None). It can be a strided view, and
+            have a different shape than the slice, with the same number of
+            elements: the slice is then reshaped to it (in C order).
 
         Returns
         -------
@@ -225,36 +233,19 @@ class ElectricField(BaseDataObj):
             slicey = np.s_[:]
         if slicex is None:
             slicex = np.s_[:]
-        if self.cpp is not None:
-            amp = self.field[0, slicey, slicex]
-            phase = self.field[1, slicey, slicex]
-            if out is None:
-                out = np.empty(phase.shape, dtype=self.complex_dtype)
-            if phase.ndim == 2 and phase.dtype == self.dtype and out.dtype == self.complex_dtype:
-                self._check_wavelength_compatibility(wavelengthInNm)
-                self.cpp.ef_at_lambda(amp, phase, self.dtype((2 * np.pi) / wavelengthInNm), out)
-                return out
-        phi = self.phi_at_lambda(wavelengthInNm, slicey=slicey, slicex=slicex)
-        ef = self.xp.exp(1j * phi, dtype=self.complex_dtype, out=out)
-        ef *= self.field[0, slicey, slicex]
-        return ef
-
-    def product(self, ef2, subrect=None):
-        """
-        Multiply the electric field by another electric field.
-
-        Parameters
-        ----------
-        ef2 : ElectricField
-            The other electric field.
-        subrect : tuple, optional
-            The subrectangle to multiply (top-left coordinate into ef2. Default: None, which means all of ef2).
-        """
-#        subrect = self.checkOther(ef2, subrect=subrect)    # TODO check subrect from atmo_propagation, even in PASSATA it does not seem right
-        x2 = subrect[0] + self.size[0]
-        y2 = subrect[1] + self.size[1]
-        self.field[0] *= ef2.field[0, subrect[0] : x2, subrect[1] : y2]
-        self.field[1] += ef2.field[1, subrect[0] : x2, subrect[1] : y2]
+        self._check_wavelength_compatibility(wavelengthInNm)
+        amp = self.field[0, slicey, slicex]
+        phase = self.field[1, slicey, slicex]
+        if out is None:
+            out = self.xp.empty(amp.shape, dtype=self.complex_dtype)
+        k = self.dtype((2 * np.pi) / wavelengthInNm)
+        if (self.cpp is not None and phase.ndim == 2 and out.shape == phase.shape
+                and phase.dtype == self.dtype and out.dtype == self.complex_dtype):
+            self.cpp.ef_at_lambda(amp, phase, k, out)
+            return out
+        # A single kernel on GPU. Reshaping to out does nothing if the shapes are the same.
+        _ef_at_lambda(amp.reshape(out.shape), phase.reshape(out.shape), k, out, xp=self.xp)
+        return out
 
     def area(self):
         """
@@ -317,22 +308,6 @@ class ElectricField(BaseDataObj):
         sub_ef.field[1, :] = self.field[1, xfrom:xto, yfrom:yto]
         sub_ef.S0 = self.S0
         return sub_ef
-
-    def compare(self, ef2):
-        """
-        Compare this ElectricField object with another ElectricField object.
-
-        Parameters
-        ----------
-        ef2 : ElectricField
-            The ElectricField object to compare with.
-
-        Returns
-        -------
-        bool
-            True if the fields are different, False if they are equal.
-        """
-        return not (self.xp.array_equal(self.field, ef2.field))
 
     def get_fits_header(self):
         hdr = fits.Header()

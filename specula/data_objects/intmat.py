@@ -6,6 +6,7 @@ from specula.lib.mmse_reconstructor import compute_mmse_reconstructor
 from iteras.data_objects.matrix import Matrix, matrix_array_name
 from specula.data_objects.recmat import Recmat
 from specula.data_objects.ifunc import IFunc
+from specula.lib.slopes_layout import SlopesLayout
 from iteras.lib import storage
 
 
@@ -50,12 +51,12 @@ class Intmat(Matrix):
                  pupdata_tag: str = '',
                  subapdata_tag: str = '',
                  norm_factor: float= 0.0,
+                 slopes_layout: SlopesLayout=None,
                  target_device_idx: int=None,
                  precision: int=None):
         """
-        Note
-        ----
-        
+        Notes
+        -----
         axes are [slopes, modes]
 
         Members .modes and .slopes allow numpy-like access, for example:
@@ -72,6 +73,7 @@ class Intmat(Matrix):
         self.pupdata_tag = pupdata_tag
         self.subapdata_tag = subapdata_tag
         self.norm_factor = norm_factor
+        self.slopes_layout = slopes_layout
 
     @property
     def intmat(self):
@@ -141,8 +143,19 @@ class Intmat(Matrix):
         hdr['NORMFACT'] = self.norm_factor
         return hdr
 
+    def get_metadata_arrays(self):
+        '''The :attr:`slopes_layout`, if set, as named arrays (see SlopesLayout.to_arrays())'''
+        return {} if self.slopes_layout is None else self.slopes_layout.to_arrays()
+
+    def set_metadata_arrays(self, arrays):
+        '''Restore the :attr:`slopes_layout` saved by :meth:`get_metadata_arrays`, if present'''
+        layout = SlopesLayout.from_arrays(arrays)
+        if layout is not None:
+            self.slopes_layout = layout
+
     def _arrays_to_save(self):
-        return {'matrix': self.matrix, 'slopemm': self.slope_mm, 'sloperms': self.slope_rms}
+        return {'matrix': self.matrix, 'slopemm': self.slope_mm, 'sloperms': self.slope_rms,
+                **self.get_metadata_arrays()}
 
     def save(self, filename, overwrite=True):
         # FITS layout as before: the matrix in the first extension, after an empty primary HDU
@@ -160,23 +173,30 @@ class Intmat(Matrix):
             norm_factor = float(hdr.get('NORMFACT', 0.0))
             pupdata_tag = hdr.get('PUP_TAG', '')
             subapdata_tag = hdr.get('SA_TAG', '')
-            # Optional arrays, read only if both are present
-            if f.has('slopemm', 2) and f.has('sloperms', 3):
-                slope_mm = f.read('slopemm', 2)
-                slope_rms = f.read('sloperms', 3)
+            layout_names = (SlopesLayout.IDX_NAME, SlopesLayout.SHAPE_NAME, SlopesLayout.KIND_NAME)
+            layout_arrays = {name: f.read(name) for name in f.names() if name.upper() in layout_names}
+            # Optional arrays, read only if both are present. Files with a layout
+            # have named arrays: no fallback to the HDU index, taken by the layout
+            # when slope_mm/slope_rms were not saved
+            i_mm, i_rms = (None, None) if layout_arrays else (2, 3)
+            if f.has('slopemm', i_mm) and f.has('sloperms', i_rms):
+                slope_mm = f.read('slopemm', i_mm)
+                slope_rms = f.read('sloperms', i_rms)
             else:
                 slope_mm = slope_rms = None
             intmat = f.load(matrix_array_name(f), 1, target_device_idx=target_device_idx)
-        return Intmat(intmat, slope_mm=slope_mm, slope_rms=slope_rms, pupdata_tag=pupdata_tag,
-                      subapdata_tag=subapdata_tag, norm_factor=norm_factor,
-                      target_device_idx=target_device_idx)
+        im = Intmat(intmat, slope_mm=slope_mm, slope_rms=slope_rms, pupdata_tag=pupdata_tag,
+                    subapdata_tag=subapdata_tag, norm_factor=norm_factor,
+                    target_device_idx=target_device_idx)
+        im.set_metadata_arrays(layout_arrays)
+        return im
 
-    def generate_rec(self, nmodes=None, cut_modes=0, w_vec=None, interactive=False):
+    def generate_rec(self, nmodes=None, cut_modes=0):
         if nmodes is not None:
             intmat = self.modes[:nmodes]
         else:
             intmat = self.intmat
-        recmat = self.pseudo_invert(self.to_xp(intmat), n_modes_to_drop=cut_modes, w_vec=w_vec, interactive=interactive)
+        recmat = self.pseudo_invert(self.to_xp(intmat), n_modes_to_drop=cut_modes)
         rec = Recmat(recmat, target_device_idx=self.target_device_idx)
         rec.im_tag = self.norm_factor  # TODO wrong
         return rec
@@ -240,7 +260,15 @@ class Intmat(Matrix):
         rec = Recmat(recmat, target_device_idx=self.target_device_idx)
         return rec
 
-    def pseudo_invert(self, matrix, n_modes_to_drop=0, w_vec=None, interactive=False):
-        # TODO handle n_modes_to_drop, and w_vec
-        return self.xp.linalg.pinv(matrix)
+    def pseudo_invert(self, matrix, n_modes_to_drop=0):
+        """
+        Pseudo-inverse of *matrix*, dropping the *n_modes_to_drop* smallest singular values.
+        """
+        if n_modes_to_drop == 0:
+            return self.xp.linalg.pinv(matrix)
+        u, s, vt = self.xp.linalg.svd(matrix, full_matrices=False)
+        if not 0 < n_modes_to_drop < len(s):
+            raise ValueError(f'pseudo_invert: n_modes_to_drop must be between 0 and {len(s) - 1}')
+        n = len(s) - n_modes_to_drop
+        return (vt[:n].T / s[:n]) @ u[:, :n].T
 

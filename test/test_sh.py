@@ -13,7 +13,7 @@ from specula.data_objects.electric_field import ElectricField
 from specula.data_objects.laser_launch_telescope import LaserLaunchTelescope
 from specula.data_objects.simul_params import SimulParams
 from specula.processing_objects.sh import SH
-from test.specula_testlib import cpu_and_gpu
+from test.specula_testlib import cpu_and_gpu, accelerate, graph_captured
 
 
 class TestSH(unittest.TestCase):
@@ -160,7 +160,6 @@ class TestSH(unittest.TestCase):
         # Test 1: sh1 and sh2 should share arrays (same geometry, same rank)
         assert id(sh1._wf3) == id(sh2._wf3), "sh1 and sh2 should share _wf3"
         assert id(sh1._intensity) == id(sh2._intensity), "sh1 and sh2 should share _intensity"
-        assert id(sh1.ef_row) == id(sh2.ef_row), "sh1 and sh2 should share ef_row"
 
         # Test 2: sh3 should NOT share with sh1/sh2 (different geometry)
         assert id(sh1._wf3) != id(sh3._wf3), "sh3 should have different _wf3 (different geometry)"
@@ -172,9 +171,9 @@ class TestSH(unittest.TestCase):
         # We should have entries for:
         # - sh1/sh2 (shared, rank 0, geometry 20)
         # - sh3 (separate, rank 0, geometry 30)
-        # Each geometry allocates 5 arrays (_wf3, ef_row, _intensity, _int_tmp, _int_img)
-        # So expected: 2 geometries × 5 arrays = 10 entries
-        assert cache_size == 10
+        # Each geometry allocates 4 arrays (_wf3, _intensity, _int_tmp, _int_img)
+        # So expected: 2 geometries × 4 arrays = 8 entries
+        assert cache_size == 8
         print(f"Cache has {cache_size} entries")
 
     @cpu_and_gpu
@@ -292,6 +291,7 @@ class TestSH(unittest.TestCase):
             for sh in shs:
                 sh.inputs['in_ef'].set(ef)
                 sh.setup()
+            accelerate(*shs)
             for t, phase in enumerate(phases):
                 ef.A[:] = ef.to_xp(pupil)
                 ef.phaseInNm[:] = ef.to_xp(phase)
@@ -309,7 +309,7 @@ class TestSH(unittest.TestCase):
 
         assert gpu_shs[0].ef_interpolator.interpolated_ef() is \
                gpu_shs[1].ef_interpolator.interpolated_ef()
-        assert all(sh.cuda_graph is not None for sh in gpu_shs)
+        assert all(graph_captured(sh) for sh in gpu_shs)
 
         for k, rot in enumerate([0.0, 7.0]):
             cpu_ef = ElectricField(n, n, 0.1, S0=10, target_device_idx=-1)
@@ -425,7 +425,6 @@ class TestSH(unittest.TestCase):
 
         sh.setup()
         self.assertEqual(sh._ovs_ef_size, 96)
-        self.assertEqual(sh.ef_row.shape[1], 96)
 
         sh.check_ready(t)
         sh.trigger()
@@ -478,6 +477,7 @@ class TestSH(unittest.TestCase):
         sh.inputs['sodium_altitude'].set(altitude)
         sh.inputs['sodium_intensity'].set(intensity)
         sh.setup()
+        accelerate(sh)
 
         def step(t):
             for obj in (ef, altitude, intensity):
@@ -539,8 +539,8 @@ class TestSH(unittest.TestCase):
                 step1(t)
                 step2(t)
             self.assertIs(sh1._kernelobj.kernels, sh2._kernelobj.kernels)
-            if target_device_idx >= 0:
-                self.assertIsNotNone(sh2.cuda_graph)
+            if target_device_idx >= 0:  # pragma: gpu
+                self.assertTrue(graph_captured(sh2))
             out1 = out(sh1)
 
             intensity2.value[:] = new_profile

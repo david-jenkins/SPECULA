@@ -171,16 +171,33 @@ Notes
 Accelerating objects
 ====================
 
-With ``--accelerate``, the GPU work of the objects runs as CUDA graphs chained on
-one stream per device, without the host waiting for the GPU between objects:
+By default, the GPU work of the objects runs as CUDA graphs chained on
+one stream per device, without the host waiting for the GPU between objects.
+Simulations whose time per step is set by the host, not by the GPU, run
+faster; the results agree with those of a run without the accelerator to
+rounding. ``--no-accelerate`` turns it off:
 
 .. code-block:: bash
 
-    specula --accelerate params.yml
+    specula --no-accelerate params.yml
 
-Simulations whose time per step is set by the host, not by the GPU, run
-faster; the results agree with those of the normal run to rounding. See
-:doc:`accelerator`.
+See :doc:`accelerator`.
+
+Data objects on the device
+==========================
+
+Some classes keep large input data objects on the host and build what they need
+on the GPU in blocks (``host_data_objects``, see :doc:`extension_api`): for example
+``ModalrecImplicitPolc`` with its reconstruction, projection and interaction
+matrices, 6.7 GB for MORFEO. This lowers the GPU memory peak during setup, but
+the matrices pass through host memory. With ``--data-objects-on-device`` all
+data objects are restored on the device of the object that uses them, streamed
+from the files without host copies: no host memory peak, but a higher GPU memory
+peak during setup.
+
+.. code-block:: bash
+
+    specula --data-objects-on-device params.yml
 
 .. _running_with_mpi:
 
