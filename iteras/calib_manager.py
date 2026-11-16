@@ -21,7 +21,8 @@ class CalibManager():
         super().__init__()
         # Subdirectories of the data types, extended by plugins (see iteras.registry)
         self._subdirs = registry.calib_subdirs()
-        self.root_dir = root_dir
+        # Expand '~' here, since not every file operation does (os.path.exists and os.replace don't)
+        self.root_dir = os.path.expanduser(root_dir)
         self.logger = get_iteras_logger('iteras.calib_manager')
 
     def root_subdir(self, type):
